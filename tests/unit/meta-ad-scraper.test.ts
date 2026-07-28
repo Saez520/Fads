@@ -49,6 +49,11 @@ describe('Meta Ad scraper', () => {
     expect(page.gotoUrls).toHaveLength(1); expect(page.gotoUrls[0]).toContain('q=diabetes'); expect(page.evaluateCount).toBe(0);
     expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
   });
+  it('emits browser, search, batch and finish events', async () => {
+    const events: string[] = []; const page = new InstrumentedPage([[graphqlResponse([fixtureAd('logged')], false)]]);
+    await scrapeMetaAds({ query: 'logged' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event.type) });
+    expect(events).toEqual(expect.arrayContaining(['start', 'browser', 'search', 'batch', 'finish']));
+  });
   it('times out an action without GraphQL and still cleans up', async () => {
     vi.useFakeTimers();
     const page = new InstrumentedPage([[]]); const counters = { contextClose: 0, browserClose: 0 };

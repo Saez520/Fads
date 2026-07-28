@@ -36,6 +36,11 @@ describe('scrape runner and persisted output', () => {
       expect(published.records).toHaveLength(1); expect(decodeNormalizedAd(JSON.stringify(published.records[0])).exactFingerprint).toBeTruthy();
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+  it('logs final persistence after the successful writer call', async () => {
+    const events: string[] = []; const writer = new MemoryWriter();
+    await runScrape({ query: 'logged' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), writer), logger: (event) => events.push(event.type) });
+    expect(events.filter((type) => type === 'persist')).toHaveLength(2);
+  });
   it('writes a blocked partial and does not reuse records across runs', async () => {
     const writer = new MemoryWriter();
     const blocked = await runScrape({ query: 'x' }, options(new RunnerPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]), writer));

@@ -14,6 +14,7 @@ detalle incluye nombre, mensaje y stack. Ejemplos:
 ```sh
 head -n 5 data/mcp-tasks/<taskId>/logs/execution.jsonl
 tail -n 1 data/mcp-tasks/<taskId>/logs/execution.jsonl
+grep '"level":"error"' data/mcp-tasks/<taskId>/logs/execution.jsonl
 jq -c . data/mcp-tasks/<taskId>/logs/execution.jsonl
 jq -c . data/mcp-tasks/<taskId>/logs/error.jsonl
 ```

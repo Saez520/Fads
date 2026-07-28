@@ -23,7 +23,7 @@ export async function runScrape(input: unknown, options: ScrapeRunnerOptions = {
     latestRecords = result.records;
     const summary: ScrapeSummary = { query: request.query, count: result.records.length, status: result.status, stopReason: result.stopReason, durationMs: clock.now() - started, extractionStatus: result.extractionStatus, ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}) };
     const envelope = createScrapeEnvelope(request.query, result.records, summary);
-    if (writer) await writer.write(envelope);
+     if (writer) { await writer.write(envelope); options.logger?.({ type: 'persist', query: request.query, count: result.records.length }); }
     return envelope;
   } catch (error) {
     await persist('incompleta', 'error', sanitizeExtractionError(error, latestRecords.length > 0));
