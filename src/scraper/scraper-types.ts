@@ -11,7 +11,8 @@ export interface ScrapeSummary { query: string; count: number; status: ScrapeSta
 export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 
 export type LoggerEvent =
-  | { type: 'start' | 'finish' | 'batch' | 'persist' | 'blocked' | 'retry'; query: string; [key: string]: unknown };
+  | { type: 'start' | 'finish' | 'batch' | 'persist' | 'blocked' | 'retry' | 'browser' | 'search'; query: string; [key: string]: unknown }
+  | { type: 'error'; query: string; message: string; error?: unknown; [key: string]: unknown };
 export type Logger = (event: LoggerEvent) => void;
 export interface Clock { now(): number }
 export type Sleeper = (milliseconds: number) => Promise<void>;

@@ -40,6 +40,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     browser = await launcher.launch({ headless: true });
     context = await browser.newContext();
     page = await context.newPage();
+    logger({ type: 'browser', query: request.query, message: 'browser.ready' });
     const pending: Promise<void>[] = [];
     let finalRateLimit = false;
     let hasNextPage = true;
@@ -64,6 +65,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       pending.push(task);
     });
     const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query }).toString()}`;
+    logger({ type: 'search', query: request.query, message: 'search.started' });
     let retryIndex = 0;
     const action = async (work: () => Promise<unknown>): Promise<void> => {
       while (true) {
@@ -85,11 +87,11 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       }
     };
     await action(() => page!.goto(url));
-    if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; }
+    if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); }
     while (!finalRateLimit && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0) {
       const previousCount = sourceIds.size;
       await action(() => page!.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
-      if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; break; }
+      if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); break; }
       if (sourceIds.size >= maxSourceAds) { stopReason = 'ad_limit'; break; }
       if (sourceIds.size === previousCount || latestIds === 0) { stopReason = 'no_new_ads'; break; }
     }
@@ -97,6 +99,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
   } catch (error) {
     primaryError = error;
+    logger({ type: 'error', query: request.query, message: 'scraper.error', error, stopReason });
     if (!exhaustedRetries) { status = 'incompleta'; stopReason = 'error'; }
   } finally {
     for (const [name, resource] of [['page', page], ['context', context], ['browser', browser]] as const) {

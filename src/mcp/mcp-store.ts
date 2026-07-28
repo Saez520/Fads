@@ -5,6 +5,7 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 import type { IngestionIndex } from '../ingestion/ingestion-types.js';
 import { MCP_DEFAULTS, type ExtractionSummary, type McpTask } from './mcp-types.js';
 import type { ExtractionStatus } from '../scraper/scraper-types.js';
+import { ExecutionLogger } from './execution-logger.js';
 
 export interface MpcStoreOptions { ingestionRoot?: string; taskRoot?: string }
 export class McpStore {
@@ -22,7 +23,8 @@ export class McpStore {
     if (!Array.isArray(raw)) throw new Error('INGESTION_NOT_FOUND');
     return { index: { ...index, extractionStatus: index.extractionStatus ?? legacyExtractionStatus(index.status) }, records: raw as NormalizedAdRecord[] };
   }
-  async saveTask(task: McpTask): Promise<void> { await mkdir(this.taskRoot, { recursive: true }); const finalPath = join(this.taskRoot, `${task.taskId}.json`); const temporaryPath = join(this.taskRoot, `.${task.taskId}.${randomUUID()}.tmp`); try { await writeFile(temporaryPath, `${JSON.stringify(task)}\n`, 'utf8'); await rename(temporaryPath, finalPath); } finally { await rm(temporaryPath, { force: true }); } }
+  async saveTask(task: McpTask): Promise<void> { await mkdir(this.taskRoot, { recursive: true }); new ExecutionLogger(this.taskRoot, task.taskId); const finalPath = join(this.taskRoot, `${task.taskId}.json`); const temporaryPath = join(this.taskRoot, `.${task.taskId}.${randomUUID()}.tmp`); try { await writeFile(temporaryPath, `${JSON.stringify(task)}\n`, 'utf8'); await rename(temporaryPath, finalPath); } finally { await rm(temporaryPath, { force: true }); } }
+  getExecutionLogger(taskId: string): ExecutionLogger { return new ExecutionLogger(this.taskRoot, taskId); }
   async getTask(taskId: string): Promise<McpTask | undefined> { try { return JSON.parse(await readFile(join(this.taskRoot, `${taskId}.json`), 'utf8')) as McpTask; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; } }
   async listTasks(): Promise<McpTask[]> { let entries; try { entries = await readdir(this.taskRoot); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []; throw e; } const tasks: McpTask[] = []; for (const name of entries) { if (!name.endsWith('.json')) continue; try { tasks.push(JSON.parse(await readFile(join(this.taskRoot, name), 'utf8')) as McpTask); } catch { /* ignore malformed state */ } } return tasks; }
   async interruptActiveTasks(now = new Date().toISOString()): Promise<McpTask[]> { const tasks = await this.listTasks(); const active = new Set(['pendiente', 'ejecutando', 'esperando_confirmacion']); const changed: McpTask[] = []; for (const task of tasks) { if (active.has(task.status)) { const next = { ...task, status: 'interrumpida' as const, updatedAt: now, progress: { ...task.progress, etapa: 'interrumpida' } }; await this.saveTask(next); changed.push(next); } } return changed; }
