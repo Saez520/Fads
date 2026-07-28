@@ -15,6 +15,7 @@ const defaultRandom: Random = () => Math.random();
 export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number }
 export interface MetaAdScraperOptions {
   launcher?: BrowserLauncher; sleep?: Sleeper; random?: Random; clock?: Clock; logger?: Logger;
+  captureWindow?: () => Promise<void>;
   onBatch?: (records: NormalizedAdRecord[]) => Promise<void> | void; maxSourceAds?: number;
 }
 
@@ -26,6 +27,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const random = options.random ?? defaultRandom;
   const clock = options.clock ?? defaultClock;
   const logger = options.logger ?? (() => undefined);
+  const captureWindow = options.captureWindow ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
   const maxSourceAds = options.maxSourceAds ?? 1500;
   const records: NormalizedAdRecord[] = [];
   const sourceIds = new Set<string>();
@@ -53,14 +55,13 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         if (parsed.finalRateLimit) { finalRateLimit = true; return; }
         if (!parsed.batch) return;
         hasNextPage = parsed.batch.hasNextPage;
-        latestIds = 0;
         for (const ad of parsed.batch.ads) {
           if (sourceIds.size >= maxSourceAds || sourceIds.has(ad.ad_archive_id)) continue;
           sourceIds.add(ad.ad_archive_id); latestIds++;
           records.push(...normalizeAndFingerprintAd(ad));
         }
         logger({ type: 'batch', query: request.query, sourceCount: sourceIds.size, count: records.length });
-        if (latestIds > 0 && options.onBatch) return Promise.resolve(options.onBatch(records.slice(-records.length)));
+        if (latestIds > 0 && options.onBatch) return Promise.resolve(options.onBatch(records));
       }).catch((error) => { throw error; });
       pending.push(task);
     });
@@ -68,7 +69,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     let retryIndex = 0;
     const action = async (work: () => Promise<unknown>): Promise<void> => {
       while (true) {
-        try { await waitForThrottle(sleep, random); await work(); await Promise.all(pending.splice(0)); return; }
+        try {
+          latestIds = 0;
+          await waitForThrottle(sleep, random);
+          await work();
+          await Promise.all(pending.splice(0));
+          await captureWindow();
+          await Promise.all(pending.splice(0));
+          return;
+        }
         catch (error) {
           const delay = await waitForRetry(sleep, retryIndex++);
           if (delay === null) { exhaustedRetries = true; status = 'incompleta'; stopReason = 'retries_exhausted'; throw error; }
