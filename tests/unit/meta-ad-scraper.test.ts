@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graphql-response-fixture.js';
 import { scrapeMetaAds } from '../../src/scraper/meta-ad-scraper.js';
-import type { Browser, BrowserContext, BrowserLauncher, BrowserPage, BrowserPageResponse } from '../../src/scraper/scraper-types.js';
+import { sanitizeExtractionError, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageResponse } from '../../src/scraper/scraper-types.js';
 
 class InstrumentedPage implements BrowserPage {
   private listener?: (response: BrowserPageResponse) => void | Promise<void>;
@@ -27,6 +27,15 @@ function fakeLauncher(page: InstrumentedPage, counters: { contextClose: number; 
 }
 const noWait = async (): Promise<void> => {};
 afterEach(() => { vi.useRealTimers(); });
+
+describe('extraction diagnostic sanitization', () => {
+  it('redacts bearer credentials and local details', () => {
+    const diagnostic = sanitizeExtractionError(new Error('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret-signature /Users/test/app.ts'), false);
+    expect(diagnostic.userMessage).toContain('no se recuperaron');
+    expect(diagnostic.technicalDetail).not.toContain('eyJhbGci');
+    expect(diagnostic.technicalDetail).not.toContain('/Users/test');
+  });
+});
 
 describe('Meta Ad scraper', () => {
   it('captures late GraphQL responses inside the injected window', async () => {

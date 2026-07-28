@@ -32,7 +32,7 @@ export function sanitizeExtractionError(error: unknown, hasRecords: boolean): Ex
   const scrubbed = raw
     .replace(/https?:\/\/[^\s)]+/gi, '[url]')
     .replace(/(?:[A-Za-z]:[\\/]|\/tmp\/|\/Users\/|\/home\/|\/var\/)[^\s)]+/g, '[ruta]')
-    .replace(/(?:api[_-]?key|token|secret|password|authorization|cookie)\s*[=:]\s*[^\s,;]+/gi, '$1=[redactado]')
+    .replace(/(?:api[_-]?key|token|secret|password|authorization|cookie)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi, '$1=[redactado]')
     .replace(/\b(?:sk|pk|ghp|xox[baprs])_[A-Za-z0-9_-]{8,}\b/gi, '[secreto]')
     .replace(/\s+at\s+[^\n]+/gi, '')
     .replace(/[\r\n]+/g, ' ')
