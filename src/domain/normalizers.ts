@@ -67,7 +67,7 @@ function addMedia(
 function collectMedia(input: AdSnapshotInput, card?: AdCardInput): MediaReference[] {
   const media: MediaReference[] = [];
   const source = card ?? input;
-  addMedia(source, source, [
+  addMedia(media, source, [
     { type: 'video_hd', field: 'video_hd_url' },
     { type: 'video_sd', field: 'video_sd_url' },
     { type: 'video_thumbnail', field: 'video_preview_image_url' },
