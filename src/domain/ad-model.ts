@@ -8,6 +8,7 @@ export type MediaType =
   | 'image_resized'
   | 'watermarked_video_hd'
   | 'watermarked_video_sd'
+  | 'watermarked_image'
   | 'watermarked_image_resized';
 
 export interface MediaReference {

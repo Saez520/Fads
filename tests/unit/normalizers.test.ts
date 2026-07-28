@@ -55,4 +55,27 @@ describe('ad normalization', () => {
     expect(record.copy.bodyText).toBeNull();
     expect(record.creativeIdentity.normalizedMediaUrl).toBeNull();
   });
+
+  it('preserves watermarked media found only in direct snapshot arrays', () => {
+    const [record] = normalizeAd({
+      ad_archive_id: 'watermarked-only',
+      snapshot: {
+        videos: [{ watermarked_video_hd_url: 'https://cdn.test/video.mp4?signature=one' }],
+        images: [{ watermarked_image_url: 'https://cdn.test/image.jpg?signature=two' }],
+      },
+    });
+
+    expect(record.media).toEqual([
+      {
+        type: 'watermarked_video_hd',
+        url: 'https://cdn.test/video.mp4',
+        mediaId: null,
+      },
+      {
+        type: 'watermarked_image',
+        url: 'https://cdn.test/image.jpg',
+        mediaId: null,
+      },
+    ]);
+  });
 });

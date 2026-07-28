@@ -75,6 +75,7 @@ function collectMedia(input: AdSnapshotInput, card?: AdCardInput): MediaReferenc
     { type: 'watermarked_video_sd', field: 'watermarked_video_sd_url' },
     { type: 'image_original', field: 'original_image_url' },
     { type: 'image_resized', field: 'resized_image_url' },
+    { type: 'watermarked_image', field: 'watermarked_image_url' },
     { type: 'watermarked_image_resized', field: 'watermarked_resized_image_url' },
   ]);
   if (!card) {
@@ -94,8 +95,12 @@ function collectMediaFromList(
     { type: 'video_hd', field: 'video_hd_url' },
     { type: 'video_sd', field: 'video_sd_url' },
     { type: 'video_thumbnail', field: 'video_preview_image_url' },
+    { type: 'watermarked_video_hd', field: 'watermarked_video_hd_url' },
+    { type: 'watermarked_video_sd', field: 'watermarked_video_sd_url' },
     { type: 'image_original', field: 'original_image_url' },
     { type: 'image_resized', field: 'resized_image_url' },
+    { type: 'watermarked_image', field: 'watermarked_image_url' },
+    { type: 'watermarked_image_resized', field: 'watermarked_resized_image_url' },
   ]);
   if (media.length === before) {
     const candidate = normalizeMediaUrl(input.url as string | null | undefined);

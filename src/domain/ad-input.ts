@@ -8,6 +8,7 @@ export interface AdMediaInput {
   watermarked_video_sd_url?: string | null;
   original_image_url?: string | null;
   resized_image_url?: string | null;
+  watermarked_image_url?: string | null;
   watermarked_resized_image_url?: string | null;
   [key: string]: unknown;
 }
