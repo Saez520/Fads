@@ -1,4 +1,5 @@
 import type { NormalizedAdRecord } from '../domain/ad-model.js';
+import type { ExtractionDiagnostic, ExtractionStatus } from '../scraper/scraper-types.js';
 
 export type IngestionStatus = 'running' | 'completed' | 'failed' | 'partial';
 
@@ -10,6 +11,8 @@ export interface IngestionIndex {
   status: IngestionStatus;
   source: string;
   durationMs: number;
+  extractionStatus?: ExtractionStatus;
+  diagnostic?: ExtractionDiagnostic;
 }
 
 export interface IngestionWarning {
@@ -37,6 +40,7 @@ export interface IngestionResult {
   searchId?: string;
   ingestionPath?: string;
   index?: IngestionIndex;
+  diagnostic?: ExtractionDiagnostic;
 }
 
 export interface IngestionConfig {

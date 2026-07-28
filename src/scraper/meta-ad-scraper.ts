@@ -5,7 +5,7 @@ import { isGraphQlEndpoint, parseGraphQlResponse } from './graphql-response-pars
 import { waitForRetry } from './retry-policy.js';
 import { waitForThrottle } from './timing-policy.js';
 import type { AdInput } from '../domain/ad-input.js';
-import type { Browser, BrowserLauncher, BrowserPage, CaptureWindow, Clock, Logger, MetaAdScraperOptions, Random, ScrapeRequest, ScrapeStatus, Sleeper, StopReason } from './scraper-types.js';
+import { extractionStatusFor, sanitizeExtractionError, type Browser, type BrowserLauncher, type BrowserPage, type CaptureWindow, type Clock, type ExtractionDiagnostic, type ExtractionStatus, type Logger, type MetaAdScraperOptions, type Random, type ScrapeRequest, type ScrapeStatus, type Sleeper, type StopReason } from './scraper-types.js';
 export type { MetaAdScraperOptions } from './scraper-types.js';
 
 const defaultLauncher: BrowserLauncher = { launch: (options) => chromium.launch(options) as unknown as Promise<Browser> };
@@ -13,7 +13,7 @@ const defaultSleep: Sleeper = (ms) => new Promise((resolve) => setTimeout(resolv
 const defaultClock: Clock = { now: () => performance.now() };
 const defaultRandom: Random = () => Math.random();
 
-export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number }
+export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number; extractionStatus: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScraperOptions = {}): Promise<ScraperResult> {
@@ -104,7 +104,8 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       try { await resource.close(); } catch (error) { logger({ type: 'finish', query: request.query, cleanupError: `${name}: ${errorMessage(error)}` }); }
     }
   }
-  const result = { records, status, stopReason, sourceCount: sourceIds.size };
+  const diagnostic = primaryError === undefined ? undefined : sanitizeExtractionError(primaryError, records.length > 0);
+  const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined, records.length), ...(diagnostic ? { diagnostic } : {}) };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
 }

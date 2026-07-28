@@ -2,11 +2,13 @@ import type { AdInput } from '../domain/ad-input.js';
 import type { NormalizedAdRecord } from '../domain/ad-model.js';
 
 export type ScrapeStatus = 'completa' | 'incompleta' | 'bloqueada';
+export type ExtractionStatus = 'completada' | 'fallida' | 'parcial';
 export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'error';
+export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string }
 
 export interface ScrapeRequest { query: string }
-export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number }
-export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean }
+export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
+export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 
 export type LoggerEvent =
   | { type: 'start' | 'finish' | 'batch' | 'persist' | 'blocked' | 'retry'; query: string; [key: string]: unknown };
@@ -16,6 +18,30 @@ export type Sleeper = (milliseconds: number) => Promise<void>;
 export type Random = () => number;
 export type CaptureWindow = (nextGraphQlResponse: Promise<void>) => Promise<void>;
 export interface ResultWriter { write(envelope: ScrapeEnvelope): Promise<void> }
+
+export function extractionStatusFor(hasError: boolean, recordCount: number): ExtractionStatus {
+  if (!hasError) return 'completada';
+  return recordCount === 0 ? 'fallida' : 'parcial';
+}
+
+export function sanitizeExtractionError(error: unknown, hasRecords: boolean): ExtractionDiagnostic {
+  const userMessage = hasRecords
+    ? 'La extracción no pudo completarse; se conservaron resultados parciales.'
+    : 'La extracción no pudo completarse y no se recuperaron resultados.';
+  const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Error de extracción';
+  const scrubbed = raw
+    .replace(/https?:\/\/[^\s)]+/gi, '[url]')
+    .replace(/(?:[A-Za-z]:[\\/]|\/tmp\/|\/Users\/|\/home\/|\/var\/)[^\s)]+/g, '[ruta]')
+    .replace(/(?:api[_-]?key|token|secret|password|authorization|cookie)\s*[=:]\s*[^\s,;]+/gi, '$1=[redactado]')
+    .replace(/\b(?:sk|pk|ghp|xox[baprs])_[A-Za-z0-9_-]{8,}\b/gi, '[secreto]')
+    .replace(/\s+at\s+[^\n]+/gi, '')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+  const technicalDetail = scrubbed && scrubbed.length <= 240 && !/\b(?:config|env|process\.env)\b/i.test(scrubbed)
+    ? scrubbed
+    : 'Error técnico durante la extracción.';
+  return { userMessage, technicalDetail };
+}
 
 export interface BrowserPageResponse { url(): string; json(): Promise<unknown> }
 export interface BrowserPage {

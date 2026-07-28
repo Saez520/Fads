@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { decodeNormalizedAd } from '../data/json-codec.js';
 import type { NormalizedAdRecord } from '../domain/ad-model.js';
-import type { ScrapeEnvelope, ScrapeStatus, StopReason } from '../scraper/scraper-types.js';
+import { sanitizeExtractionError, type ScrapeEnvelope, type ScrapeStatus, type StopReason } from '../scraper/scraper-types.js';
 import {
   DEFAULT_INGESTION_SOURCE,
   type ConfirmRelaunch,
@@ -64,15 +64,17 @@ export class IngestionService {
 
       let searchId: string;
       do { searchId = this.generateSearchId(); } while (await this.store.exists(searchId));
-      const status = this.statusFor(envelope.summary.status, envelope.incomplete, warnings.length > 0);
+      const status = this.statusFor(envelope.summary.extractionStatus, envelope.summary.status, envelope.incomplete, warnings.length > 0, records.length);
       const index: IngestionIndex = {
         searchId, query: envelope.query, createdAt: new Date(this.clock.now()).toISOString(),
         totalRecords: records.length, status, source: this.source, durationMs: envelope.summary.durationMs,
+        extractionStatus: envelope.extractionStatus ?? envelope.summary.extractionStatus ?? (status === 'failed' ? 'fallida' : status === 'partial' ? 'parcial' : 'completada'),
+        ...(envelope.diagnostic ?? envelope.summary.diagnostic ? { diagnostic: envelope.diagnostic ?? envelope.summary.diagnostic } : {}),
       };
       const reference = await this.store.publish(index, records);
       return { success: true, created: true, searchId, ingestionPath: reference.ingestionPath, index, warnings, errors: [] };
     } catch (error) {
-      return { success: false, created: false, warnings, errors: [this.error(error)] };
+      return { success: false, created: false, warnings, errors: [this.error(error)], diagnostic: sanitizeExtractionError(error, records.length > 0) };
     }
   }
 
@@ -85,17 +87,15 @@ export class IngestionService {
     if (!summary || typeof summary !== 'object' || Array.isArray(summary)) throw new Error('Invalid scrape summary');
     const item = summary as Record<string, unknown>;
     if (item.query !== input.query || typeof item.count !== 'number' || !Number.isFinite(item.count) || item.count < 0 || typeof item.durationMs !== 'number' || !Number.isFinite(item.durationMs) || item.durationMs < 0 || !isScrapeStatus(item.status) || !isStopReason(item.stopReason)) throw new Error('Invalid scrape summary');
-    return { query: input.query, records: input.records as NormalizedAdRecord[], summary: item as unknown as ScrapeEnvelope['summary'], incomplete: input.incomplete };
+    return { query: input.query, records: input.records as NormalizedAdRecord[], summary: item as unknown as ScrapeEnvelope['summary'], incomplete: input.incomplete, ...(input.extractionStatus ? { extractionStatus: input.extractionStatus as ScrapeEnvelope['extractionStatus'] } : {}), ...(input.diagnostic ? { diagnostic: input.diagnostic as ScrapeEnvelope['diagnostic'] } : {}) };
   }
 
-  private statusFor(status: ScrapeStatus, incomplete: boolean, discarded: boolean): IngestionStatus {
-    return status === 'completa' && !incomplete && !discarded ? 'completed' : 'partial';
+  private statusFor(extractionStatus: ScrapeEnvelope['summary']['extractionStatus'], status: ScrapeStatus, incomplete: boolean, discarded: boolean, recordCount: number): IngestionStatus {
+    if (extractionStatus === 'fallida' || (status !== 'completa' && recordCount === 0)) return 'failed';
+    return extractionStatus === 'parcial' || incomplete || discarded ? 'partial' : 'completed';
   }
 
-  private error(error: unknown): IngestionError { return { message: error instanceof Error ? error.message : String(error) }; }
+  private error(error: unknown): IngestionError { return { message: sanitizeExtractionError(error, false).technicalDetail }; }
 }
-
 function isScrapeStatus(value: unknown): value is ScrapeStatus { return value === 'completa' || value === 'incompleta' || value === 'bloqueada'; }
-function isStopReason(value: unknown): value is StopReason {
-  return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'error';
-}
+function isStopReason(value: unknown): value is StopReason { return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'error'; }
