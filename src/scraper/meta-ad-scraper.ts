@@ -5,7 +5,8 @@ import { isGraphQlEndpoint, parseGraphQlResponse } from './graphql-response-pars
 import { waitForRetry } from './retry-policy.js';
 import { waitForThrottle } from './timing-policy.js';
 import type { AdInput } from '../domain/ad-input.js';
-import type { Browser, BrowserLauncher, BrowserPage, Clock, Logger, Random, ScrapeRequest, ScrapeStatus, Sleeper, StopReason } from './scraper-types.js';
+import type { Browser, BrowserLauncher, BrowserPage, CaptureWindow, Clock, Logger, MetaAdScraperOptions, Random, ScrapeRequest, ScrapeStatus, Sleeper, StopReason } from './scraper-types.js';
+export type { MetaAdScraperOptions } from './scraper-types.js';
 
 const defaultLauncher: BrowserLauncher = { launch: (options) => chromium.launch(options) as unknown as Promise<Browser> };
 const defaultSleep: Sleeper = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -13,12 +14,6 @@ const defaultClock: Clock = { now: () => performance.now() };
 const defaultRandom: Random = () => Math.random();
 
 export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number }
-export interface MetaAdScraperOptions {
-  launcher?: BrowserLauncher; sleep?: Sleeper; random?: Random; clock?: Clock; logger?: Logger;
-  captureWindow?: () => Promise<void>;
-  onBatch?: (records: NormalizedAdRecord[]) => Promise<void> | void; maxSourceAds?: number;
-}
-
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScraperOptions = {}): Promise<ScraperResult> {
@@ -27,7 +22,8 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const random = options.random ?? defaultRandom;
   const clock = options.clock ?? defaultClock;
   const logger = options.logger ?? (() => undefined);
-  const captureWindow = options.captureWindow ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
+  const captureTimeoutMs = options.captureTimeoutMs ?? 2000;
+  const captureWindow: CaptureWindow = options.captureWindow ?? ((nextGraphQlResponse) => waitForCaptureWindow(nextGraphQlResponse, captureTimeoutMs));
   const maxSourceAds = options.maxSourceAds ?? 1500;
   const records: NormalizedAdRecord[] = [];
   const sourceIds = new Set<string>();
@@ -48,8 +44,10 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     let finalRateLimit = false;
     let hasNextPage = true;
     let latestIds = 0;
+    let nextGraphQlResponse: Deferred<void> | undefined;
     page.on('response', (response) => {
       if (!isGraphQlEndpoint(response.url())) return;
+      nextGraphQlResponse?.resolve();
       const task = response.json().then((payload) => {
         const parsed = parseGraphQlResponse(payload);
         if (parsed.finalRateLimit) { finalRateLimit = true; return; }
@@ -71,10 +69,11 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       while (true) {
         try {
           latestIds = 0;
+          nextGraphQlResponse = createDeferred<void>();
           await waitForThrottle(sleep, random);
           await work();
           await Promise.all(pending.splice(0));
-          await captureWindow();
+          await captureWindow(nextGraphQlResponse.promise);
           await Promise.all(pending.splice(0));
           return;
         }
@@ -108,4 +107,19 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const result = { records, status, stopReason, sourceCount: sourceIds.size };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
+}
+
+type Deferred<T> = { promise: Promise<T>; resolve: (value?: T | PromiseLike<T>) => void; reject: (error: unknown) => void };
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = (value) => resolvePromise(value as T); reject = rejectPromise; });
+  return { promise, resolve, reject };
+}
+
+async function waitForCaptureWindow(nextGraphQlResponse: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); });
+  await Promise.race([nextGraphQlResponse, timeout]);
+  if (timer !== undefined) clearTimeout(timer);
 }

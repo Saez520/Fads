@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graphql-response-fixture.js';
 import { scrapeMetaAds } from '../../src/scraper/meta-ad-scraper.js';
 import type { Browser, BrowserContext, BrowserLauncher, BrowserPage, BrowserPageResponse } from '../../src/scraper/scraper-types.js';
@@ -8,9 +8,13 @@ class InstrumentedPage implements BrowserPage {
   readonly gotoUrls: string[] = [];
   evaluateCount = 0;
   closeCount = 0;
-  constructor(private readonly responses: unknown[][], private readonly gotoFailures = 0) {}
+  constructor(private readonly responses: unknown[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number) {}
   on(_event: 'response', listener: (response: BrowserPageResponse) => void | Promise<void>): void { this.listener = listener; }
-  async goto(url: string): Promise<void> { this.gotoUrls.push(url); if (this.gotoUrls.length <= this.gotoFailures) throw new Error('temporary navigation error'); this.emit(this.responses.shift() ?? []); }
+  async goto(url: string): Promise<void> {
+    this.gotoUrls.push(url); if (this.gotoUrls.length <= this.gotoFailures) throw new Error('temporary navigation error');
+    const emit = () => this.emit(this.responses.shift() ?? []);
+    if (this.responseDelayMs === undefined) emit(); else setTimeout(emit, this.responseDelayMs);
+  }
   async evaluate(): Promise<void> { this.evaluateCount++; this.emit(this.responses.shift() ?? []); }
   async close(): Promise<void> { this.closeCount++; }
   emit(payloads: unknown[]): void { for (const payload of payloads) this.listener?.({ url: () => 'https://www.facebook.com/api/graphql/?q=x', json: async () => payload }); }
@@ -22,16 +26,27 @@ function fakeLauncher(page: InstrumentedPage, counters: { contextClose: number; 
   return { launch: async (options) => { expect(options.headless).toBe(true); return browser; } };
 }
 const noWait = async (): Promise<void> => {};
+afterEach(() => { vi.useRealTimers(); });
 
 describe('Meta Ad scraper', () => {
   it('captures late GraphQL responses inside the injected window', async () => {
-    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [graphqlResponse([fixtureAd('2')], false)]]);
-    const captureWindow = async (): Promise<void> => { if (page.evaluateCount === 0) page.emitNext(); };
+    vi.useFakeTimers();
+    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], false)]], 0, 25);
     const counters = { contextClose: 0, browserClose: 0 };
-    const result = await scrapeMetaAds({ query: 'diabetes' }, { launcher: fakeLauncher(page, counters), sleep: noWait, captureWindow, random: () => 0 });
-    expect(result.sourceCount).toBe(2); expect(result.stopReason).toBe('end_of_results');
+    const scraping = scrapeMetaAds({ query: 'diabetes' }, { launcher: fakeLauncher(page, counters), sleep: noWait, random: () => 0 });
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await scraping;
+    expect(result.sourceCount).toBe(1); expect(result.stopReason).toBe('end_of_results');
     expect(page.gotoUrls).toHaveLength(1); expect(page.gotoUrls[0]).toContain('q=diabetes'); expect(page.evaluateCount).toBe(0);
     expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
+  });
+  it('times out an action without GraphQL and still cleans up', async () => {
+    vi.useFakeTimers();
+    const page = new InstrumentedPage([[]]); const counters = { contextClose: 0, browserClose: 0 };
+    const scraping = scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, counters), sleep: noWait, random: () => 0, captureTimeoutMs: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await scraping;
+    expect(result.sourceCount).toBe(0); expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
   });
   it('stops on no-new, without an extra scroll', async () => {
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [graphqlResponse([fixtureAd('1')], true)]]);

@@ -14,6 +14,7 @@ export type Logger = (event: LoggerEvent) => void;
 export interface Clock { now(): number }
 export type Sleeper = (milliseconds: number) => Promise<void>;
 export type Random = () => number;
+export type CaptureWindow = (nextGraphQlResponse: Promise<void>) => Promise<void>;
 export interface ResultWriter { write(envelope: ScrapeEnvelope): Promise<void> }
 
 export interface BrowserPageResponse { url(): string; json(): Promise<unknown> }
@@ -26,6 +27,17 @@ export interface BrowserPage {
 export interface BrowserContext { newPage(): Promise<BrowserPage>; close(): Promise<void> }
 export interface Browser { newContext(options?: Record<string, unknown>): Promise<BrowserContext>; close(): Promise<void> }
 export interface BrowserLauncher { launch(options: { headless: true }): Promise<Browser> }
+export interface MetaAdScraperOptions {
+  launcher?: BrowserLauncher;
+  sleep?: Sleeper;
+  random?: Random;
+  clock?: Clock;
+  logger?: Logger;
+  captureWindow?: CaptureWindow;
+  captureTimeoutMs?: number;
+  onBatch?: (records: NormalizedAdRecord[]) => Promise<void> | void;
+  maxSourceAds?: number;
+}
 
 export interface ParsedBatch { ads: AdInput[]; hasNextPage: boolean; endCursor: string | null; sourceIds: string[] }
 export interface GraphQlError { message?: string; code?: number; severity?: string; extensions?: { is_final?: boolean; [key: string]: unknown } }
