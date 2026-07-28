@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "engram": {
+      "type": "local",
+      "command": ["engram", "mcp", "--conflict-strategy=lww", "--surfacing=informational", "--log-level=warn"],
+      "enabled": true
+    },
+    "ferris-search": {
+      "type": "local",
+      "command": ["ferris-search", "mcp"],
+      "enabled": true
+    },
+    "meta-ad-agent-mcp": {
+      "type": "local",
+      "command": ["npm", "run", "mcp"],
+      "enabled": true,
+      "timeout": 15000
+    }
+  },
+  "tools": {
+    "meta-ad-agent-mcp_*": false
+  }
+}
