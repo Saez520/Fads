@@ -15,7 +15,7 @@ export interface StartSearchInput { query: string; filtros?: McpFilters; forceRe
 export interface SearchResult { searchId: string; query: string; createdAt: string; status: 'completada' | 'parcial' | 'fallida'; count: number; durationMs: number; warnings: string[]; errors: string[] }
 export interface ExtractionSummary { searchId: string; query: string; createdAt: string; status: string; totalRecords: number; durationMs: number }
 export interface FingerprintGroup { fingerprint: string; count: number; ejemplo?: NormalizedAdRecord; variantes?: Array<NormalizedAdRecord['copy']> }
-export interface GroupSummary { tipo: 'exacto' | 'creativo'; grupos: FingerprintGroup[]; sinFingerprint: number; }
+export interface GroupSummary { exactos: FingerprintGroup[]; creativos: FingerprintGroup[]; sinFingerprint: number; sinCreativeFingerprint: number; duplicadosLiterales: FingerprintGroup[]; mismosCreativos: FingerprintGroup[]; }
 export interface AdSearchResult { anuncios: NormalizedAdRecord[]; pagina: PageInfo }
 export type McpErrorCode = 'TASK_NOT_FOUND' | 'INGESTION_NOT_FOUND' | 'GROUP_NOT_FOUND' | 'INVALID_FILTERS' | 'RELAUNCH_CONFIRMATION_REQUIRED' | 'INVALID_ARGUMENT' | 'INTERNAL_ERROR';
 export interface SuccessEnvelope<T> { resultado: T }
