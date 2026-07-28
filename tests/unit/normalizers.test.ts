@@ -78,4 +78,35 @@ describe('ad normalization', () => {
       },
     ]);
   });
+
+  it('uses the first mediaId found across all media references', () => {
+    const [record] = normalizeAd({
+      ad_archive_id: 'later-media-id',
+      snapshot: {
+        cards: [{ video_hd_url: 'https://cdn.test/card.mp4' }],
+        videos: [{ media_id: '  Creative-ID-A  ', video_hd_url: 'https://cdn.test/video.mp4' }],
+        images: [{ media_id: 'Creative-ID-B', original_image_url: 'https://cdn.test/image.jpg' }],
+      },
+    });
+
+    expect(record.creativeIdentity.mediaId).toBe('  Creative-ID-A  ');
+    expect(record.creativeIdentity.normalizedMediaUrl).toBe('https://cdn.test/card.mp4');
+  });
+
+  it('keeps snapshot video and image references in addition to DCO card media', () => {
+    const [record] = normalizeAd({
+      ad_archive_id: 'dco-with-snapshot-media',
+      snapshot: {
+        cards: [{ video_hd_url: 'https://cdn.test/card.mp4' }],
+        videos: [{ video_sd_url: 'https://cdn.test/snapshot.mp4' }],
+        images: [{ original_image_url: 'https://cdn.test/snapshot.jpg' }],
+      },
+    });
+
+    expect(record.media.map((reference) => reference.url)).toEqual([
+      'https://cdn.test/card.mp4',
+      'https://cdn.test/snapshot.mp4',
+      'https://cdn.test/snapshot.jpg',
+    ]);
+  });
 });

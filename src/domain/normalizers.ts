@@ -51,13 +51,17 @@ function nullableString(value: string | null | undefined): string | null {
   return normalizeText(value);
 }
 
+function preserveMediaId(value: string | null | undefined): string | null {
+  return value ?? null;
+}
+
 function addMedia(
   media: MediaReference[],
   input: AdMediaInput | null | undefined,
   options: { type: MediaReference['type']; field: keyof AdMediaInput }[],
 ): void {
   if (!input) return;
-  const mediaId = nullableString(input.media_id ?? input.id);
+  const mediaId = preserveMediaId(input.media_id ?? input.id);
   for (const { type, field } of options) {
     const url = normalizeMediaUrl(input[field] as string | null | undefined);
     if (url) media.push({ type, url, mediaId });
@@ -78,10 +82,8 @@ function collectMedia(input: AdSnapshotInput, card?: AdCardInput): MediaReferenc
     { type: 'watermarked_image', field: 'watermarked_image_url' },
     { type: 'watermarked_image_resized', field: 'watermarked_resized_image_url' },
   ]);
-  if (!card) {
-    for (const video of input.videos ?? []) collectMediaFromList(media, video, 'video_hd');
-    for (const image of input.images ?? []) collectMediaFromList(media, image, 'image_original');
-  }
+  for (const video of input.videos ?? []) collectMediaFromList(media, video, 'video_hd');
+  for (const image of input.images ?? []) collectMediaFromList(media, image, 'image_original');
   return media;
 }
 
@@ -104,7 +106,7 @@ function collectMediaFromList(
   ]);
   if (media.length === before) {
     const candidate = normalizeMediaUrl(input.url as string | null | undefined);
-    if (candidate) media.push({ type: fallbackType, url: candidate, mediaId: nullableString(input.media_id ?? input.id) });
+    if (candidate) media.push({ type: fallbackType, url: candidate, mediaId: preserveMediaId(input.media_id ?? input.id) });
   }
 }
 
@@ -119,6 +121,7 @@ function normalizeRecord(
   const source = card ?? snapshot;
   const media = collectMedia(snapshot, card);
   const firstMedia = media[0];
+  const firstMediaWithId = media.find((reference) => reference.mediaId !== null);
   return {
     provenance: {
       sourceAdId: input.ad_archive_id,
@@ -151,7 +154,7 @@ function normalizeRecord(
     },
     media,
     creativeIdentity: {
-      mediaId: firstMedia?.mediaId ?? null,
+      mediaId: firstMediaWithId?.mediaId ?? null,
       normalizedMediaUrl: firstMedia?.url ?? null,
     },
     regulatory: {
