@@ -32,7 +32,7 @@ export class IngestionService {
 
   private readonly options: IngestionOperationOptions;
 
-  async ingestFile(inputPath: string): Promise<IngestionResult> {
+  async ingestFile(inputPath: string, options: { confirmRelaunch?: ConfirmRelaunch } = {}): Promise<IngestionResult> {
     let envelope: ScrapeEnvelope;
     try {
       envelope = this.parseEnvelope(await readFile(inputPath, 'utf8'));
@@ -55,7 +55,7 @@ export class IngestionService {
     try {
       const existing = await this.store.findByQuery(envelope.query);
       if (existing) {
-        const confirm = this.options.confirmRelaunch;
+        const confirm = options.confirmRelaunch ?? this.options.confirmRelaunch;
         const message = `La query ya existe; relanzarla puede tardar varios minutos. ¿Desea relanzarla?`;
         if (!confirm || !(await confirm(existing, message))) {
           return { success: true, created: false, searchId: existing.searchId, ingestionPath: existing.ingestionPath, warnings: [], errors: [] };

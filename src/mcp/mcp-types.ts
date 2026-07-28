@@ -10,7 +10,7 @@ export interface PageInfo { limit: number; nextCursor: string | null; total: num
 export type TaskStatus = 'pendiente' | 'ejecutando' | 'esperando_confirmacion' | 'completada' | 'parcial' | 'fallida' | 'interrumpida';
 export interface TaskProgress { etapa: string; procesados: number; total?: number }
 export interface TaskError { codigo: McpErrorCode; mensaje: string; detalle?: unknown }
-export interface McpTask { taskId: string; query: string; filtros: McpFilters; status: TaskStatus; createdAt: string; updatedAt: string; progress: TaskProgress; searchId?: string; result?: SearchResult; error?: TaskError }
+export interface McpTask { taskId: string; query: string; filtros: McpFilters; forceRelaunch?: boolean; status: TaskStatus; createdAt: string; updatedAt: string; progress: TaskProgress; searchId?: string; result?: SearchResult; error?: TaskError }
 export interface StartSearchInput { query: string; filtros?: McpFilters; forceRelaunch?: boolean }
 export interface SearchResult { searchId: string; query: string; createdAt: string; status: 'completada' | 'parcial' | 'fallida'; count: number; durationMs: number; warnings: string[]; errors: string[] }
 export interface ExtractionSummary { searchId: string; query: string; createdAt: string; status: string; totalRecords: number; durationMs: number }
