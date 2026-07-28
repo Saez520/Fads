@@ -1,0 +1,11 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { FileSystemIngestionStore } from '../../src/ingestion/ingestion-store.js';
+import { IngestionService } from '../../src/ingestion/ingestion-service.js';
+import { McpApplicationService } from '../../src/mcp/mcp-service.js';
+import { McpStore } from '../../src/mcp/mcp-store.js';
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+describe('McpApplicationService', () => { it('returns a task immediately', async () => { const root = await mkdtemp(join(tmpdir(), 'mcp-service-')); roots.push(root); const ingestionStore = new FileSystemIngestionStore(join(root, 'ingestions')); const store = new McpStore({ ingestionRoot: join(root, 'ingestions'), taskRoot: join(root, 'tasks') }); const runner = async () => ({ query: 'shoes', records: [], summary: { query: 'shoes', count: 0, status: 'completa' as const, stopReason: 'end_of_results' as const, durationMs: 1 }, incomplete: false }); const service = new McpApplicationService({ store, ingestionStore, ingestionService: new IngestionService(ingestionStore), runner, generateId: () => 'task-1', temporaryRoot: join(root, 'tmp') }); const response = await service.iniciarBusqueda({ query: 'shoes' }); expect(response).toEqual({ resultado: { taskId: 'task-1' } }); expect((await store.getTask('task-1'))?.status).toBe('pendiente'); await new Promise((resolve) => setTimeout(resolve, 20)); }); });
