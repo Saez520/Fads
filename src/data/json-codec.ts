@@ -50,13 +50,13 @@ export function decodeNormalizedAd(json: string): NormalizedAdRecord {
   }
 
   return {
-    provenance: provenance as NormalizedAdRecord['provenance'],
-    advertiser: advertiser as NormalizedAdRecord['advertiser'],
-    status: { ...status, publisherPlatforms: platforms as string[] } as NormalizedAdRecord['status'],
-    copy: copy as NormalizedAdRecord['copy'],
-    media: media as NormalizedAdRecord['media'],
-    creativeIdentity: identity as NormalizedAdRecord['creativeIdentity'],
-    regulatory: regulatory as NormalizedAdRecord['regulatory'],
+    provenance: provenance as unknown as NormalizedAdRecord['provenance'],
+    advertiser: advertiser as unknown as NormalizedAdRecord['advertiser'],
+    status: { ...status, publisherPlatforms: platforms as string[] } as unknown as NormalizedAdRecord['status'],
+    copy: copy as unknown as NormalizedAdRecord['copy'],
+    media: media as unknown as NormalizedAdRecord['media'],
+    creativeIdentity: identity as unknown as NormalizedAdRecord['creativeIdentity'],
+    regulatory: regulatory as unknown as NormalizedAdRecord['regulatory'],
     exactFingerprint: (root.exactFingerprint ?? null) as string | null,
     creativeFingerprint: (root.creativeFingerprint ?? null) as string | null,
   };
