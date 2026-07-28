@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "enabled": false,
+  "selectedClis": [
+    "opencode"
+  ],
+  "initialized": false,
+  "graphPath": null,
+  "hooksInstalled": false,
+  "ignoredOutput": "graphify-out/",
+  "lastInitializationResult": "skipped",
+  "lastWarning": null,
+  "updatedAt": "2026-07-28T02:59:12.173Z",
+  "extract_status": "pending",
+  "extract_last_attempt": null,
+  "query_status": "pending",
+  "query_last_attempt": null,
+  "query_diagnostic": null,
+  "docs_media_status": "pending",
+  "docs_media_last_attempt": null,
+  "docs_media_attempt_status": null,
+  "docs_media_output_paths": [],
+  "docs_media_finished_at": null,
+  "docs_media_diagnostic": null
+}
