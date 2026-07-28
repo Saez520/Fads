@@ -11,9 +11,9 @@ import { validateScrapeRequest } from '../../src/scraper/scraper-types.js';
 
 class RunnerPage implements BrowserPage {
   private listener?: (response: BrowserPageResponse) => void | Promise<void>;
-  constructor(private readonly payloads: unknown[][]) {}
+  constructor(private readonly payloads: unknown[][], private readonly failGoto = false) {}
   on(_event: 'response', listener: (response: BrowserPageResponse) => void | Promise<void>): void { this.listener = listener; }
-  async goto(): Promise<void> { this.emit(this.payloads.shift() ?? []); }
+  async goto(): Promise<void> { if (this.failGoto) throw new Error('Authorization: Bearer secret-token /Users/local/app.ts'); this.emit(this.payloads.shift() ?? []); }
   async evaluate(): Promise<void> { this.emit(this.payloads.shift() ?? []); }
   async close(): Promise<void> {}
   private emit(payloads: unknown[]): void { for (const payload of payloads) this.listener?.({ url: () => 'https://www.facebook.com/api/graphql/?q=x', json: async () => payload }); }
@@ -45,4 +45,17 @@ describe('scrape runner and persisted output', () => {
     expect(writer.envelopes.some((entry) => entry.incomplete && entry.summary.count === 1)).toBe(true);
   });
   it('rejects filters before browser creation', () => expect(() => validateScrapeRequest({ query: 'x', filters: {} })).toThrow());
+  it('classifies successful empty extraction without a diagnostic', async () => {
+    const result = await runScrape({ query: 'empty' }, options(new RunnerPage([[]]), undefined as never));
+    expect(result).toMatchObject({ extractionStatus: 'completada', summary: { count: 0, extractionStatus: 'completada' } });
+    expect(JSON.stringify(result)).not.toContain('diagnostic');
+  });
+  it('classifies failure before records and sanitizes the persisted snapshot', async () => {
+    const writer = new MemoryWriter();
+    const result = await runScrape({ query: 'failed' }, options(new RunnerPage([], true), writer));
+    expect(result).toMatchObject({ extractionStatus: 'fallida', summary: { count: 0, extractionStatus: 'fallida' } });
+    expect(result.diagnostic?.userMessage).toContain('no se recuperaron');
+    expect(JSON.stringify(writer.envelopes)).not.toContain('secret-token');
+    expect(JSON.stringify(writer.envelopes)).not.toContain('/Users/local');
+  });
 });

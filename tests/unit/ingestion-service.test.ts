@@ -72,6 +72,26 @@ describe('IngestionService', () => {
     expect(result.success).toBe(false);
     expect(result.errors[0].message).toBe('Invalid scrape envelope');
   });
+
+  it('validates and sanitizes diagnostic metadata before publishing the index', async () => {
+    const input = envelope('diagnostic', [], true) as Record<string, unknown>;
+    input.extractionStatus = 'fallida';
+    input.diagnostic = { userMessage: 'fallo', technicalDetail: 'Authorization: Bearer secret-token /Users/local/app.ts' };
+    const { inputPath, service, store } = await setup(input);
+    const result = await service.ingestFile(inputPath);
+    expect(result.index).toMatchObject({ status: 'failed', extractionStatus: 'fallida', diagnostic: { userMessage: expect.any(String) } });
+    const persisted = JSON.stringify(result.index);
+    expect(persisted).not.toContain('secret-token');
+    expect(persisted).not.toContain('/Users/local');
+    await expect(service.ingestFile(inputPath)).resolves.toMatchObject({ success: true });
+    expect(await store.findByQuery('diagnostic')).toBeDefined();
+  });
+  it('rejects an invalid extraction status instead of persisting it', async () => {
+    const input = envelope('invalid-status', [], true) as Record<string, unknown>;
+    input.extractionStatus = 'unknown';
+    const { inputPath, service } = await setup(input);
+    await expect(service.ingestFile(inputPath)).resolves.toMatchObject({ success: false, errors: [{ message: 'Invalid extraction status' }] });
+  });
 });
 
 describe('FileSystemIngestionStore', () => {

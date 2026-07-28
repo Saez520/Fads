@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { decodeNormalizedAd } from '../data/json-codec.js';
 import type { NormalizedAdRecord } from '../domain/ad-model.js';
-import { sanitizeExtractionError, type ScrapeEnvelope, type ScrapeStatus, type StopReason } from '../scraper/scraper-types.js';
+import { sanitizeExtractionError, type ExtractionDiagnostic, type ExtractionStatus, type ScrapeEnvelope, type ScrapeStatus, type StopReason } from '../scraper/scraper-types.js';
 import {
   DEFAULT_INGESTION_SOURCE,
   type ConfirmRelaunch,
@@ -87,7 +87,12 @@ export class IngestionService {
     if (!summary || typeof summary !== 'object' || Array.isArray(summary)) throw new Error('Invalid scrape summary');
     const item = summary as Record<string, unknown>;
     if (item.query !== input.query || typeof item.count !== 'number' || !Number.isFinite(item.count) || item.count < 0 || typeof item.durationMs !== 'number' || !Number.isFinite(item.durationMs) || item.durationMs < 0 || !isScrapeStatus(item.status) || !isStopReason(item.stopReason)) throw new Error('Invalid scrape summary');
-    return { query: input.query, records: input.records as NormalizedAdRecord[], summary: item as unknown as ScrapeEnvelope['summary'], incomplete: input.incomplete, ...(input.extractionStatus ? { extractionStatus: input.extractionStatus as ScrapeEnvelope['extractionStatus'] } : {}), ...(input.diagnostic ? { diagnostic: input.diagnostic as ScrapeEnvelope['diagnostic'] } : {}) };
+    const extractionStatus = input.extractionStatus === undefined ? item.extractionStatus : input.extractionStatus;
+    if (extractionStatus !== undefined && !isExtractionStatus(extractionStatus)) throw new Error('Invalid extraction status');
+    const diagnostic = input.diagnostic === undefined ? item.diagnostic : input.diagnostic;
+    if (diagnostic !== undefined && !isDiagnostic(diagnostic)) throw new Error('Invalid extraction diagnostic');
+    const sanitizedDiagnostic = diagnostic === undefined ? undefined : sanitizeDiagnostic(diagnostic, input.records.length > 0);
+    return { query: input.query, records: input.records as NormalizedAdRecord[], summary: { ...item, ...(extractionStatus !== undefined ? { extractionStatus } : {}), ...(sanitizedDiagnostic ? { diagnostic: sanitizedDiagnostic } : {}) } as unknown as ScrapeEnvelope['summary'], incomplete: input.incomplete, ...(extractionStatus ? { extractionStatus } : {}), ...(sanitizedDiagnostic ? { diagnostic: sanitizedDiagnostic } : {}) };
   }
 
   private statusFor(extractionStatus: ScrapeEnvelope['summary']['extractionStatus'], status: ScrapeStatus, incomplete: boolean, discarded: boolean, recordCount: number): IngestionStatus {
@@ -99,3 +104,14 @@ export class IngestionService {
 }
 function isScrapeStatus(value: unknown): value is ScrapeStatus { return value === 'completa' || value === 'incompleta' || value === 'bloqueada'; }
 function isStopReason(value: unknown): value is StopReason { return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'error'; }
+function isExtractionStatus(value: unknown): value is ExtractionStatus { return value === 'completada' || value === 'fallida' || value === 'parcial'; }
+function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const diagnostic = value as Record<string, unknown>;
+  return typeof diagnostic.userMessage === 'string' && diagnostic.userMessage.length <= 240 && typeof diagnostic.technicalDetail === 'string' && diagnostic.technicalDetail.length <= 1000;
+}
+function sanitizeDiagnostic(diagnostic: ExtractionDiagnostic, hasRecords: boolean): ExtractionDiagnostic {
+  const fallback = sanitizeExtractionError(diagnostic.technicalDetail, hasRecords);
+  const safeUserMessage = sanitizeExtractionError(diagnostic.userMessage, hasRecords).userMessage;
+  return { userMessage: safeUserMessage, technicalDetail: fallback.technicalDetail };
+}
