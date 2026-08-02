@@ -17,9 +17,9 @@ const record: NormalizedAdRecord = {
   exactFingerprint: 'exact', creativeFingerprint: 'creative',
 };
 
-const envelope = (query: string, records: unknown[] = [record], incomplete = false) => ({
+const envelope = (query: string, records: unknown[] = [record], incomplete = false, stopReason = 'end_of_results') => ({
   query, records, incomplete,
-  summary: { query, count: records.length, status: incomplete ? 'incompleta' : 'completa', stopReason: 'end_of_results', durationMs: 123 },
+  summary: { query, count: records.length, status: incomplete ? 'incompleta' : 'completa', stopReason, durationMs: 123 },
 });
 
 const roots: string[] = [];
@@ -85,6 +85,14 @@ describe('IngestionService', () => {
     expect(persisted).not.toContain('/Users/local');
     await expect(service.ingestFile(inputPath)).resolves.toMatchObject({ success: true });
     expect(await store.findByQuery('diagnostic')).toBeDefined();
+  });
+  it('publishes an unrecognized response as failed while preserving its diagnostic', async () => {
+    const input = envelope('unrecognized', [], true, 'unrecognized_response') as Record<string, unknown>;
+    input.extractionStatus = 'fallida';
+    input.diagnostic = { userMessage: 'Captura inconclusa.', technicalDetail: 'Respuesta no interpretable.', alternativeSearchUrl: 'https://www.facebook.com/ads/library/?q=unrecognized' };
+    const { inputPath, service } = await setup(input);
+    const result = await service.ingestFile(inputPath);
+    expect(result).toMatchObject({ success: true, index: { status: 'failed', extractionStatus: 'fallida', diagnostic: { alternativeSearchUrl: expect.stringContaining('q=unrecognized') } } });
   });
   it('rejects an invalid extraction status instead of persisting it', async () => {
     const input = envelope('invalid-status', [], true) as Record<string, unknown>;

@@ -113,7 +113,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     }
     if (!finalRateLimit && sourceIds.size >= maxSourceAds) stopReason = 'ad_limit';
     if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
-    if (diagnosticsEnabled && !finalRateLimit && recognizedResponses === 0) {
+    if (diagnosticsEnabled && !finalRateLimit && (recognizedResponses === 0 || discardedResponses > 0)) {
       status = 'incompleta';
       stopReason = 'unrecognized_response';
       if (discardedResponses === 0) logger({ type: 'error', query: request.query, message: 'scraper.empty_capture', reason: 'empty_capture', rawResponse: responseReadError ? { responseReadError: errorMessage(responseReadError), rawResponse: null } : null });

@@ -101,6 +101,12 @@ describe('Meta Ad scraper', () => {
       expect(await readFile(logger.errorPath, 'utf8')).toContain('keep-me');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+  it('marks a later unrecognized response as partial while preserving captured records', async () => {
+    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('kept')], true)], [{ data: { unexpected: true } }]]);
+    const result = await scrapeMetaAds({ query: 'partial' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    expect(result.records).toHaveLength(1);
+    expect(result).toMatchObject({ status: 'incompleta', stopReason: 'unrecognized_response', extractionStatus: 'parcial' });
+  });
   it('keeps a recognized empty connection successful without an error log', async () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'empty-task');
     try {

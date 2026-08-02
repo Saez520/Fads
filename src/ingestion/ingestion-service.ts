@@ -103,7 +103,7 @@ export class IngestionService {
   private error(error: unknown): IngestionError { return { message: sanitizeExtractionError(error, false).technicalDetail }; }
 }
 function isScrapeStatus(value: unknown): value is ScrapeStatus { return value === 'completa' || value === 'incompleta' || value === 'bloqueada'; }
-function isStopReason(value: unknown): value is StopReason { return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'error'; }
+function isStopReason(value: unknown): value is StopReason { return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'unrecognized_response' || value === 'error'; }
 function isExtractionStatus(value: unknown): value is ExtractionStatus { return value === 'completada' || value === 'fallida' || value === 'parcial'; }
 function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
