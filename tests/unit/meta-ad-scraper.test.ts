@@ -1,6 +1,10 @@
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graphql-response-fixture.js';
 import { scrapeMetaAds } from '../../src/scraper/meta-ad-scraper.js';
+import { ExecutionLogger } from '../../src/mcp/execution-logger.js';
 import { sanitizeExtractionError, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageResponse } from '../../src/scraper/scraper-types.js';
 
 class InstrumentedPage implements BrowserPage {
@@ -77,6 +81,14 @@ describe('Meta Ad scraper', () => {
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]);
     const result = await scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result.status).toBe('bloqueada'); expect(result.stopReason).toBe('rate_limit'); expect(result.records).toHaveLength(1); expect(page.evaluateCount).toBe(1);
+  });
+  it('writes retry, scraper error and stack details through ExecutionLogger', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'retry-task');
+    try { const page = new InstrumentedPage([[], [], [], []], 4); await scrapeMetaAds({ query: 'retry' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); const execution = await readFile(logger.executionPath, 'utf8'); const errors = await readFile(logger.errorPath, 'utf8'); expect(execution).toContain('scraper.retry'); expect(errors).toContain('stack'); } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it('writes blocked events without creating error.jsonl for rate limits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'blocked-task');
+    try { const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]); await scrapeMetaAds({ query: 'blocked' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); expect(await readFile(logger.executionPath, 'utf8')).toContain('scraper.blocked'); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('uses all three backoffs and no fourth attempt', async () => {
     const page = new InstrumentedPage([[], [], [], []], 4); const waits: number[] = [];

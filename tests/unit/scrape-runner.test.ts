@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import { decodeScrapeEnvelope } from '../../src/scraper/scrape-output.js';
 import { runScrape } from '../../src/scraper/scrape-runner.js';
 import type { Browser, BrowserContext, BrowserLauncher, BrowserPage, BrowserPageResponse, ResultWriter, ScrapeEnvelope } from '../../src/scraper/scraper-types.js';
 import { validateScrapeRequest } from '../../src/scraper/scraper-types.js';
+import { ExecutionLogger } from '../../src/mcp/execution-logger.js';
 
 class RunnerPage implements BrowserPage {
   private listener?: (response: BrowserPageResponse) => void | Promise<void>;
@@ -37,9 +38,8 @@ describe('scrape runner and persisted output', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
   it('logs final persistence after the successful writer call', async () => {
-    const events: string[] = []; const writer = new MemoryWriter();
-    await runScrape({ query: 'logged' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), writer), logger: (event) => events.push(event.type) });
-    expect(events.filter((type) => type === 'persist')).toHaveLength(2);
+    const root = await mkdtemp(join(tmpdir(), 'runner-log-')); const logger = new ExecutionLogger(root, 'success-task');
+    try { const writer = new MemoryWriter(); await runScrape({ query: 'logged' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), writer), logger: logger.scraperLogger() }); expect((await readFile(logger.executionPath, 'utf8')).match(/scraper\.persist/g)).toHaveLength(2); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('writes a blocked partial and does not reuse records across runs', async () => {
     const writer = new MemoryWriter();
@@ -62,5 +62,8 @@ describe('scrape runner and persisted output', () => {
     expect(result.diagnostic?.userMessage).toContain('no se recuperaron');
     expect(JSON.stringify(writer.envelopes)).not.toContain('secret-token');
     expect(JSON.stringify(writer.envelopes)).not.toContain('/Users/local');
+    const errorRoot = await mkdtemp(join(tmpdir(), 'runner-error-log-')); const logger = new ExecutionLogger(errorRoot, 'failed-task');
+    try { await runScrape({ query: 'failed-log' }, { ...options(new RunnerPage([], true), writer), logger: logger.scraperLogger() }); } catch { /* expected extraction failure */ }
+    expect(await readFile(logger.errorPath, 'utf8')).toContain('stack'); await rm(errorRoot, { recursive: true, force: true });
   });
 });
