@@ -19,4 +19,11 @@ describe('ExecutionLogger', () => {
     const errors = (await readFile(logger.errorPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
     expect(errors[0].context).toMatchObject({ name: 'Error', message: 'boom', stack: expect.any(String), taskId: 'task-1' });
   });
+  it('serializes complex raw diagnostic context without sanitizing it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'execution-logger-')); roots.push(root);
+    const logger = new ExecutionLogger(root, 'raw-task');
+    logger.error('scraper', 'scraper.unrecognized_response', undefined, { rawResponse: { marker: 'raw-value', count: 1n, nested: {} } });
+    const line = JSON.parse((await readFile(logger.errorPath, 'utf8')).trim());
+    expect(line.context).toMatchObject({ rawResponse: { marker: 'raw-value', count: '1' } });
+  });
 });

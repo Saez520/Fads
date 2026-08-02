@@ -90,6 +90,35 @@ describe('Meta Ad scraper', () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'blocked-task');
     try { const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]); await scrapeMetaAds({ query: 'blocked' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); expect(await readFile(logger.executionPath, 'utf8')).toContain('scraper.blocked'); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
   });
+  it('diagnoses unrecognized responses with complete raw evidence and a manual alternative', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'unrecognized-task');
+    try {
+      const raw = { data: { unexpected: true }, marker: 'keep-me' };
+      const page = new InstrumentedPage([[raw]]);
+      const result = await scrapeMetaAds({ query: 'café colombiano' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), captureTimeoutMs: 1 });
+      expect(result.extractionStatus).toBe('fallida');
+      expect(result.diagnostic?.alternativeSearchUrl).toContain('q=caf%C3%A9+colombiano');
+      expect(await readFile(logger.errorPath, 'utf8')).toContain('keep-me');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it('keeps a recognized empty connection successful without an error log', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'empty-task');
+    try {
+      const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+      const result = await scrapeMetaAds({ query: 'empty' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), captureTimeoutMs: 1 });
+      expect(result).toMatchObject({ status: 'completa', extractionStatus: 'completada', sourceCount: 0 });
+      await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it('disables raw diagnostics and alternatives when explicitly disabled', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'production-task');
+    try {
+      const page = new InstrumentedPage([[{ data: { unexpected: true }, secret: 'not-logged' }]]);
+      const result = await scrapeMetaAds({ query: 'production' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), diagnosticsEnabled: false, captureTimeoutMs: 1 });
+      expect(result.diagnostic).toBeUndefined();
+      await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it('uses all three backoffs and no fourth attempt', async () => {
     const page = new InstrumentedPage([[], [], [], []], 4); const waits: number[] = [];
     const result = await scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: async (ms) => { waits.push(ms); }, random: () => 0 });

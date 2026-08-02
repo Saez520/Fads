@@ -10,5 +10,13 @@ describe('GraphQL response parser', () => {
     expect(result.batch?.endCursor).toBe('cursor');
   });
   it('prioritizes final rate limit', () => expect(parseGraphQlResponse(rateLimitResponse).finalRateLimit).toBe(true));
-  it('ignores malformed payloads', () => expect(parseGraphQlResponse({ data: {} }).batch).toBeUndefined());
+  it('classifies empty recognized connections', () => {
+    const result = parseGraphQlResponse({ data: { ad_library_main: { search_results_connection: { edges: [] } } } });
+    expect(result.classification).toBe('empty');
+    expect(result.batch?.ads).toEqual([]);
+  });
+  it.each([null, { data: {} }, { data: { ad_library_main: { search_results_connection: { edges: {} } } } }])('classifies malformed payloads as unrecognized', (payload) => {
+    expect(parseGraphQlResponse(payload).classification).toBe('unrecognized');
+  });
+  it('does not classify final rate limits as empty', () => expect(parseGraphQlResponse(rateLimitResponse).classification).toBe('finalRateLimit'));
 });

@@ -20,7 +20,11 @@ export function decodeScrapeEnvelope(json: string): ScrapeEnvelope {
 }
 
 function isExtractionStatus(value: unknown): value is ExtractionStatus { return value === 'completada' || value === 'fallida' || value === 'parcial'; }
-function isDiagnostic(value: unknown): value is ExtractionDiagnostic { return typeof value === 'object' && value !== null && !Array.isArray(value) && typeof (value as Record<string, unknown>).userMessage === 'string' && typeof (value as Record<string, unknown>).technicalDetail === 'string'; }
+function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const diagnostic = value as Record<string, unknown>;
+  return typeof diagnostic.userMessage === 'string' && typeof diagnostic.technicalDetail === 'string' && (diagnostic.alternativeSearchUrl === undefined || typeof diagnostic.alternativeSearchUrl === 'string');
+}
 
 export function createScrapeEnvelope(query: string, records: NormalizedAdRecord[], summary: ScrapeSummary): ScrapeEnvelope {
   const extractionStatus = summary.extractionStatus ?? (summary.status === 'completa' ? 'completada' : 'parcial');

@@ -108,10 +108,13 @@ function isExtractionStatus(value: unknown): value is ExtractionStatus { return 
 function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const diagnostic = value as Record<string, unknown>;
-  return typeof diagnostic.userMessage === 'string' && diagnostic.userMessage.length <= 240 && typeof diagnostic.technicalDetail === 'string' && diagnostic.technicalDetail.length <= 1000;
+    return typeof diagnostic.userMessage === 'string' && diagnostic.userMessage.length <= 240 && typeof diagnostic.technicalDetail === 'string' && diagnostic.technicalDetail.length <= 1000 && (diagnostic.alternativeSearchUrl === undefined || typeof diagnostic.alternativeSearchUrl === 'string');
 }
 function sanitizeDiagnostic(diagnostic: ExtractionDiagnostic, hasRecords: boolean): ExtractionDiagnostic {
   const fallback = sanitizeExtractionError(diagnostic.technicalDetail, hasRecords);
   const safeUserMessage = sanitizeExtractionError(diagnostic.userMessage, hasRecords).userMessage;
-  return { userMessage: safeUserMessage, technicalDetail: fallback.technicalDetail };
+  const userMessage = diagnostic.alternativeSearchUrl && !safeUserMessage.includes('búsqueda manual')
+    ? `${safeUserMessage} Puede continuar con la búsqueda manual.`
+    : safeUserMessage;
+  return { userMessage, technicalDetail: fallback.technicalDetail, ...(diagnostic.alternativeSearchUrl ? { alternativeSearchUrl: diagnostic.alternativeSearchUrl } : {}) };
 }

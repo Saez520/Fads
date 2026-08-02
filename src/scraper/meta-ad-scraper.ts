@@ -25,6 +25,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const captureTimeoutMs = options.captureTimeoutMs ?? 2000;
   const captureWindow: CaptureWindow = options.captureWindow ?? ((nextGraphQlResponse) => waitForCaptureWindow(nextGraphQlResponse, captureTimeoutMs));
   const maxSourceAds = options.maxSourceAds ?? 1500;
+  const diagnosticsEnabled = options.diagnosticsEnabled ?? process.env.NODE_ENV !== 'production';
   const records: NormalizedAdRecord[] = [];
   const sourceIds = new Set<string>();
   const started = clock.now();
@@ -43,6 +44,9 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     logger({ type: 'browser', query: request.query, message: 'browser.ready' });
     const pending: Promise<void>[] = [];
     let finalRateLimit = false;
+    let recognizedResponses = 0;
+    let discardedResponses = 0;
+    let responseReadError: unknown;
     let hasNextPage = true;
     let latestIds = 0;
     let nextGraphQlResponse: Deferred<void> | undefined;
@@ -52,7 +56,14 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       const task = response.json().then((payload) => {
         const parsed = parseGraphQlResponse(payload);
         if (parsed.finalRateLimit) { finalRateLimit = true; return; }
-        if (!parsed.batch) return;
+        if (!parsed.batch) {
+          if (diagnosticsEnabled) {
+            discardedResponses++;
+            logger({ type: 'error', query: request.query, message: 'scraper.unrecognized_response', reason: 'unrecognized_response', rawResponse: parsed.rawResponse });
+          }
+          return;
+        }
+        recognizedResponses++;
         hasNextPage = parsed.batch.hasNextPage;
         for (const ad of parsed.batch.ads) {
           if (sourceIds.size >= maxSourceAds || sourceIds.has(ad.ad_archive_id)) continue;
@@ -61,7 +72,12 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         }
         logger({ type: 'batch', query: request.query, sourceCount: sourceIds.size, count: records.length });
         if (latestIds > 0 && options.onBatch) return Promise.resolve(options.onBatch(records));
-      }).catch((error) => { throw error; });
+      }).catch((error) => {
+        if (!diagnosticsEnabled) throw error;
+        discardedResponses++;
+        responseReadError = error;
+        logger({ type: 'error', query: request.query, message: 'scraper.unrecognized_response', reason: 'unrecognized_response', rawResponse: { responseReadError: errorMessage(error), rawResponse: null } });
+      });
       pending.push(task);
     });
     const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query }).toString()}`;
@@ -97,6 +113,11 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     }
     if (!finalRateLimit && sourceIds.size >= maxSourceAds) stopReason = 'ad_limit';
     if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
+    if (diagnosticsEnabled && !finalRateLimit && recognizedResponses === 0) {
+      status = 'incompleta';
+      stopReason = 'unrecognized_response';
+      if (discardedResponses === 0) logger({ type: 'error', query: request.query, message: 'scraper.empty_capture', reason: 'empty_capture', rawResponse: responseReadError ? { responseReadError: errorMessage(responseReadError), rawResponse: null } : null });
+    }
   } catch (error) {
     primaryError = error;
     logger({ type: 'error', query: request.query, message: 'scraper.error', error, stopReason });
@@ -107,10 +128,25 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       try { await resource.close(); } catch (error) { logger({ type: 'finish', query: request.query, cleanupError: `${name}: ${errorMessage(error)}` }); }
     }
   }
-  const diagnostic = primaryError === undefined ? undefined : sanitizeExtractionError(primaryError, records.length > 0);
-  const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined, records.length), ...(diagnostic ? { diagnostic } : {}) };
+  const diagnostic = primaryError !== undefined
+    ? sanitizeExtractionError(primaryError, records.length > 0)
+    : diagnosticsEnabled && stopReason === 'unrecognized_response'
+      ? captureDiagnostic(request.query, records.length > 0)
+      : undefined;
+  const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response', records.length), ...(diagnostic ? { diagnostic } : {}) };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
+}
+
+function captureDiagnostic(query: string, hasRecords: boolean): ExtractionDiagnostic {
+  const alternativeSearchUrl = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: query }).toString()}`;
+  return {
+    userMessage: hasRecords
+      ? 'La captura quedó inconclusa; se conservaron resultados parciales. Puede continuar con la búsqueda manual.'
+      : 'La captura quedó inconclusa y no se recuperaron resultados interpretables. Puede continuar con la búsqueda manual.',
+    technicalDetail: 'Meta no devolvió una respuesta GraphQL interpretable durante la ventana de captura.',
+    alternativeSearchUrl,
+  };
 }
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value?: T | PromiseLike<T>) => void; reject: (error: unknown) => void };

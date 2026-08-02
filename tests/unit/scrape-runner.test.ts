@@ -50,10 +50,10 @@ describe('scrape runner and persisted output', () => {
     expect(writer.envelopes.some((entry) => entry.incomplete && entry.summary.count === 1)).toBe(true);
   });
   it('rejects filters before browser creation', () => expect(() => validateScrapeRequest({ query: 'x', filters: {} })).toThrow());
-  it('classifies successful empty extraction without a diagnostic', async () => {
-    const result = await runScrape({ query: 'empty' }, options(new RunnerPage([[]]), undefined as never));
-    expect(result).toMatchObject({ extractionStatus: 'completada', summary: { count: 0, extractionStatus: 'completada' } });
-    expect(JSON.stringify(result)).not.toContain('diagnostic');
+  it('classifies a capture without an interpretable response as inconclusive', async () => {
+    const result = await runScrape({ query: 'empty' }, { ...options(new RunnerPage([[]]), undefined as never), captureTimeoutMs: 1 });
+    expect(result).toMatchObject({ incomplete: true, extractionStatus: 'fallida', summary: { count: 0, status: 'incompleta', extractionStatus: 'fallida', stopReason: 'unrecognized_response' } });
+    expect(result.diagnostic?.alternativeSearchUrl).toContain('q=empty');
   });
   it('classifies failure before records and sanitizes the persisted snapshot', async () => {
     const writer = new MemoryWriter();

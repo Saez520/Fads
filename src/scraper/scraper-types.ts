@@ -3,8 +3,8 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 
 export type ScrapeStatus = 'completa' | 'incompleta' | 'bloqueada';
 export type ExtractionStatus = 'completada' | 'fallida' | 'parcial';
-export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'error';
-export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string }
+export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'unrecognized_response' | 'error';
+export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string }
 
 export interface ScrapeRequest { query: string }
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
@@ -64,11 +64,13 @@ export interface MetaAdScraperOptions {
   captureTimeoutMs?: number;
   onBatch?: (records: NormalizedAdRecord[]) => Promise<void> | void;
   maxSourceAds?: number;
+  diagnosticsEnabled?: boolean;
 }
 
 export interface ParsedBatch { ads: AdInput[]; hasNextPage: boolean; endCursor: string | null; sourceIds: string[] }
 export interface GraphQlError { message?: string; code?: number; severity?: string; extensions?: { is_final?: boolean; [key: string]: unknown } }
-export interface GraphQlParseResult { batch?: ParsedBatch; errors: GraphQlError[]; relevant: boolean; finalRateLimit: boolean }
+export type GraphQlClassification = 'recognized' | 'empty' | 'unrecognized' | 'finalRateLimit';
+export interface GraphQlParseResult { batch?: ParsedBatch; errors: GraphQlError[]; relevant: boolean; finalRateLimit: boolean; classification: GraphQlClassification; rawResponse: unknown }
 
 export function validateScrapeRequest(value: unknown): ScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid scrape request');

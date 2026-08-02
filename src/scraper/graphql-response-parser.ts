@@ -13,7 +13,8 @@ export function parseGraphQlResponse(payload: unknown): GraphQlParseResult {
   const data = record(root?.data);
   const main = record(data?.ad_library_main);
   const connection = record(main?.search_results_connection);
-  if (!connection || !Array.isArray(connection.edges)) return { errors, relevant: false, finalRateLimit };
+  if (finalRateLimit) return { errors, relevant: false, finalRateLimit, classification: 'finalRateLimit', rawResponse: payload };
+  if (!connection || !Array.isArray(connection.edges)) return { errors, relevant: false, finalRateLimit, classification: 'unrecognized', rawResponse: payload };
   const ads: AdInput[] = [];
   const ids = new Set<string>();
   for (const edge of connection.edges) {
@@ -27,5 +28,5 @@ export function parseGraphQlResponse(payload: unknown): GraphQlParseResult {
   }
   const pageInfo = record(connection.page_info);
   const batch: ParsedBatch = { ads, sourceIds: [...ids], hasNextPage: pageInfo?.has_next_page === true, endCursor: typeof pageInfo?.end_cursor === 'string' ? pageInfo.end_cursor : null };
-  return { batch, errors, relevant: true, finalRateLimit };
+  return { batch, errors, relevant: true, finalRateLimit, classification: ads.length === 0 ? 'empty' : 'recognized', rawResponse: payload };
 }
