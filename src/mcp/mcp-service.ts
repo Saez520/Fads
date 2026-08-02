@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { NormalizedAdRecord } from '../domain/ad-model.js';
@@ -6,15 +5,15 @@ import type { IngestionStore } from '../ingestion/ingestion-types.js';
 import { IngestionService } from '../ingestion/ingestion-service.js';
 import { runScrape } from '../scraper/scrape-runner.js';
 import { sanitizeExtractionError, type ResultWriter, type ScrapeEnvelope } from '../scraper/scraper-types.js';
-import { MCP_DEFAULTS, fail, ok, type AdSearchResult, type ErrorEnvelope, type ExtractionSummary, type FingerprintGroup, type GroupSummary, type McpEnvelope, type McpTask, type PageRequest, type SearchResult, type TaskError } from './mcp-types.js';
+import { MCP_DEFAULTS, fail, ok, type AdSearchResult, type ErrorEnvelope, type ExtractionSummary, type FingerprintGroup, type GroupSummary, type McpEnvelope, type McpTask, type McpTaskIdGenerator, type PageRequest, type SearchResult, type TaskError } from './mcp-types.js';
 import { matchesFilters, paginate, validateFilters, validatePage, searchRecords } from './mcp-filters.js';
 import { McpStore } from './mcp-store.js';
 
 export type ScrapeRunner = (input: unknown, options?: Record<string, unknown>) => Promise<ScrapeEnvelope>;
-export interface McpServiceOptions { store: McpStore; ingestionStore: IngestionStore; ingestionService: IngestionService; runner?: ScrapeRunner; now?: () => number; generateId?: () => string; temporaryRoot?: string }
+export interface McpServiceOptions { store: McpStore; ingestionStore: IngestionStore; ingestionService: IngestionService; runner?: ScrapeRunner; now?: () => number; generateId?: McpTaskIdGenerator; temporaryRoot?: string }
 export class McpApplicationService {
-  private readonly runner: ScrapeRunner; private readonly now: () => number; private readonly generateId: () => string; private readonly temporaryRoot: string;
-  constructor(private readonly options: McpServiceOptions) { this.runner = options.runner ?? (runScrape as unknown as ScrapeRunner); this.now = options.now ?? Date.now; this.generateId = options.generateId ?? randomUUID; this.temporaryRoot = options.temporaryRoot ?? 'data/mcp-tmp'; }
+  private readonly runner: ScrapeRunner; private readonly now: () => number; private readonly generateId: McpTaskIdGenerator; private readonly temporaryRoot: string;
+  constructor(private readonly options: McpServiceOptions) { this.runner = options.runner ?? (runScrape as unknown as ScrapeRunner); this.now = options.now ?? Date.now; this.generateId = options.generateId ?? ((query) => createTaskId(query, new Date(this.now()))); this.temporaryRoot = options.temporaryRoot ?? 'data/mcp-tmp'; }
   async iniciarBusqueda(input: unknown): Promise<McpEnvelope<{ taskId: string }>> {
     try {
       if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('INVALID_ARGUMENT', 'Los argumentos deben ser un objeto.');
@@ -23,7 +22,7 @@ export class McpApplicationService {
       if (value.forceRelaunch !== undefined && typeof value.forceRelaunch !== 'boolean') return fail('INVALID_ARGUMENT', 'forceRelaunch debe ser booleano.');
       const existing = await this.options.ingestionStore.findByQuery(value.query.trim());
       if (existing && !forceRelaunch) return fail('RELAUNCH_CONFIRMATION_REQUIRED', 'La query ya existe; confirme el relanzamiento.', { searchId: existing.searchId, sugerencia: 'Reintente con forceRelaunch: true.' });
-      const now = new Date(this.now()).toISOString(); const task: McpTask = { taskId: this.generateId(), query: value.query.trim(), filtros, forceRelaunch, status: 'pendiente', createdAt: now, updatedAt: now, progress: { etapa: 'pendiente', procesados: 0 } };
+      const now = new Date(this.now()).toISOString(); const query = value.query.trim(); const task: McpTask = { taskId: this.generateId(query), query, filtros, forceRelaunch, status: 'pendiente', createdAt: now, updatedAt: now, progress: { etapa: 'pendiente', procesados: 0 } };
       await this.options.store.saveTask(task); this.options.store.getExecutionLogger(task.taskId).info('mcp', 'task.created', { taskId: task.taskId, query: task.query }); void this.runWorker(task, forceRelaunch);
       return ok({ taskId: task.taskId });
     } catch (error) { return this.errorEnvelope(error); }
@@ -41,4 +40,16 @@ export class McpApplicationService {
   private groupByFingerprint(records: NormalizedAdRecord[], field: 'exactFingerprint' | 'creativeFingerprint', creative: boolean): { groups: FingerprintGroup[]; missing: number } { const grouped = new Map<string, NormalizedAdRecord[]>(); let missing = 0; for (const record of records) { const fingerprint = record[field]; if (fingerprint === null || fingerprint === undefined) { missing++; continue; } const list = grouped.get(fingerprint) ?? []; list.push(record); grouped.set(fingerprint, list); } const groups: FingerprintGroup[] = [...grouped.entries()].map(([fingerprint, values]) => creative ? { fingerprint, count: values.length, variantes: [...new Map(values.map((v) => [JSON.stringify(v.copy), v.copy])).values()] } : { fingerprint, count: values.length, ejemplo: values[0] }); return { groups, missing }; }
   private async runWorker(task: McpTask, forceRelaunch: boolean): Promise<void> { const logger = this.options.store.getExecutionLogger(task.taskId); logger.info('mcp', 'task.started', { taskId: task.taskId }); const update = async (patch: Partial<McpTask>) => this.options.store.saveTask({ ...task, ...patch, updatedAt: new Date(this.now()).toISOString() }); let temp: string | undefined; try { await update({ status: 'ejecutando', progress: { etapa: 'scraping', procesados: 0 } }); await mkdir(this.temporaryRoot, { recursive: true }); temp = join(this.temporaryRoot, `${task.taskId}.json`); const writer: ResultWriter = { write: async (envelope) => writeFile(temp!, `${JSON.stringify(envelope)}\n`, 'utf8') }; const envelope = await this.runner({ query: task.query }, { writer, logger: logger.scraperLogger(), onBatch: (records: NormalizedAdRecord[]) => update({ progress: { etapa: 'scraping', procesados: records.length } }) }); const filtered = envelope.records.filter((record) => matchesFilters(record, task.filtros)); await writeFile(temp, `${JSON.stringify({ ...envelope, records: filtered, summary: { ...envelope.summary, count: filtered.length } })}\n`, 'utf8'); const ingestion = await this.options.ingestionService.ingestFile(temp, { confirmRelaunch: async () => forceRelaunch }); const diagnostic = ingestion.index?.diagnostic ?? envelope.diagnostic ?? ingestion.diagnostic; const status = ingestion.success ? (ingestion.index?.status === 'failed' ? 'fallida' : ingestion.index?.status === 'partial' || envelope.incomplete ? 'parcial' : 'completada') : 'fallida'; const result: SearchResult = { searchId: ingestion.searchId ?? '', query: task.query, createdAt: new Date(this.now()).toISOString(), status, count: ingestion.index?.totalRecords ?? filtered.length, durationMs: ingestion.index?.durationMs ?? envelope.summary.durationMs, warnings: ingestion.warnings.map((w) => w.message), errors: ingestion.errors.map((e) => e.message), ...(diagnostic ? { diagnostic } : {}) }; await update({ status, searchId: ingestion.searchId, result, ...(diagnostic ? { error: { codigo: 'INTERNAL_ERROR', mensaje: diagnostic.userMessage, detalle: diagnostic } } : {}), progress: { etapa: status, procesados: result.count, total: result.count } }); logger.info('mcp', 'task.completed', { taskId: task.taskId, status, searchId: result.searchId, count: result.count }); } catch (error) { const diagnostic = sanitizeExtractionError(error, false); const taskError: TaskError = { codigo: 'INTERNAL_ERROR', mensaje: diagnostic.userMessage, detalle: diagnostic }; logger.error('mcp', 'task.failed', error, { taskId: task.taskId }); await update({ status: 'fallida', error: taskError, progress: { etapa: 'fallida', procesados: 0 } }); } finally { if (temp) await rm(temp, { force: true }); } }
   private errorEnvelope(error: unknown): ErrorEnvelope { const code = error instanceof Error && ['TASK_NOT_FOUND', 'INGESTION_NOT_FOUND', 'GROUP_NOT_FOUND', 'INVALID_FILTERS', 'RELAUNCH_CONFIRMATION_REQUIRED', 'INVALID_ARGUMENT'].includes(error.message) ? error.message as TaskError['codigo'] : 'INTERNAL_ERROR'; return fail(code, code === 'INTERNAL_ERROR' ? 'Error interno.' : error instanceof Error ? error.message : String(error)); }
+}
+
+const TASK_ID_STOP_WORDS = new Set(['a', 'al', 'con', 'de', 'del', 'el', 'en', 'la', 'las', 'los', 'para', 'por', 'un', 'una', 'y']);
+
+export function createTaskId(query: string, date = new Date()): string {
+  const words = query.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const keywords = words.filter((word) => !TASK_ID_STOP_WORDS.has(word)).slice(0, 5);
+  const slug = (keywords.length > 0 ? keywords : words).join('-') || 'task';
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = String(date.getFullYear()).slice(-2);
+  return `${slug}-${day}-${month}-${year}`;
 }
