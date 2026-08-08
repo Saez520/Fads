@@ -9,6 +9,11 @@ describe('GraphQL response parser', () => {
     expect(result.batch?.hasNextPage).toBe(true);
     expect(result.batch?.endCursor).toBe('cursor');
   });
+  it('ignores invalid GraphQL ads while retaining valid ads in the batch', () => {
+    const result = parseGraphQlResponse(graphqlResponse([{ page_name: 'invalid' } as never, fixtureAd('valid')], false));
+    expect(result.classification).toBe('recognized');
+    expect(result.batch?.sourceIds).toEqual(['valid']);
+  });
   it('prioritizes final rate limit', () => expect(parseGraphQlResponse(rateLimitResponse).finalRateLimit).toBe(true));
   it('classifies empty recognized connections', () => {
     const result = parseGraphQlResponse({ data: { ad_library_main: { search_results_connection: { edges: [] } } } });

@@ -1,10 +1,10 @@
 import type { AdInput } from '../domain/ad-input.js';
-import type { GraphQlError, GraphQlParseResult, ParsedBatch, SsrParseResult } from './scraper-types.js';
+import type { GraphQlError, GraphQlParseResult, SsrParseResult } from './scraper-types.js';
 
 const endpoint = 'https://www.facebook.com/api/graphql/';
 function record(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 
-function batchFromConnection(connection: Record<string, unknown>, requirePageInfo: boolean): SsrParseResult {
+function batchFromConnection(connection: Record<string, unknown>, requirePageInfo: boolean, strict = true): SsrParseResult {
   if (!Array.isArray(connection.edges)) return { classification: 'incomplete' };
   const pageInfo = record(connection.page_info);
   if (requirePageInfo && typeof pageInfo?.has_next_page !== 'boolean') return { classification: 'incomplete' };
@@ -15,7 +15,10 @@ function batchFromConnection(connection: Record<string, unknown>, requirePageInf
     const collated = node && Array.isArray(node.collated_results) ? node.collated_results : [];
     for (const item of collated) {
       const ad = record(item);
-      if (typeof ad?.ad_archive_id !== 'string') return { classification: 'incomplete' };
+      if (typeof ad?.ad_archive_id !== 'string') {
+        if (strict) return { classification: 'incomplete' };
+        continue;
+      }
       if (ids.has(ad.ad_archive_id)) continue;
       ids.add(ad.ad_archive_id);
       ads.push(ad as unknown as AdInput);
@@ -85,7 +88,8 @@ export function parseGraphQlResponse(payload: unknown): GraphQlParseResult {
   const connection = record(main?.search_results_connection);
   if (finalRateLimit) return { errors, relevant: false, finalRateLimit, classification: 'finalRateLimit', rawResponse: payload };
   if (!connection || !Array.isArray(connection.edges)) return { errors, relevant: false, finalRateLimit, classification: 'unrecognized', rawResponse: payload };
-  const ssr = batchFromConnection(connection, false);
-  const batch = ssr.batch as ParsedBatch;
+  const parsed = batchFromConnection(connection, false, false);
+  if (!parsed.batch) return { errors, relevant: false, finalRateLimit, classification: 'unrecognized', rawResponse: payload };
+  const batch = parsed.batch;
   return { batch, errors, relevant: true, finalRateLimit, classification: batch.ads.length === 0 ? 'empty' : 'recognized', rawResponse: payload };
 }
