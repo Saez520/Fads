@@ -26,6 +26,7 @@ class InstrumentedPage implements BrowserPage {
     const emit = () => this.emit(this.responses.shift() ?? []);
     if (this.responseDelayMs === undefined) emit(); else setTimeout(emit, this.responseDelayMs);
   }
+  async reload(): Promise<void> { await this.goto(this.gotoUrls[this.gotoUrls.length - 1] ?? ''); }
   async evaluate(): Promise<void> { this.evaluateCount++; this.emit(this.responses.shift() ?? []); }
   async close(): Promise<void> { this.closeCount++; }
   emit(payloads: unknown[]): void {
@@ -191,7 +192,7 @@ describe('Meta Ad scraper', () => {
     const asset = documentResponseWithRequest('https://example.test/app.js', 'secret', requestForTest('https://example.test/app.js', 'script'));
     const page = new InstrumentedPage([[documentResponseWithRequest('https://example.test/start', '<html>redirect</html>', origin), terminalResponse, asset, { requestFailed: failedRequest('https://example.test/fail?token=secret', 'DNS failure') }]]);
     const result = await scrapeMetaAds({ query: 'evidence', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
-    expect(result.stopReason).toBe('empty_capture');
+    expect(result.stopReason).toBe('unrecognized_response');
     expect(result.diagnostic?.networkEvidence).toHaveLength(2);
     expect(result.diagnostic?.networkEvidence?.filter((item) => item.kind === 'document')).toHaveLength(1);
     expect(result.diagnostic?.networkEvidence?.some((item) => item.kind === 'network_failure')).toBe(true);
@@ -226,9 +227,13 @@ describe('Meta Ad scraper', () => {
     expect(url.searchParams.get('q')).not.toContain('últimos 3 meses');
     expect(url.searchParams.get('country')).toBe('CO');
     expect(url.searchParams.get('ad_type')).toBe('all');
-    expect(url.searchParams.get('start_date')).toBe('1778112000');
-    expect(url.searchParams.get('end_date')).toBe('1786147199');
-    expect([...url.searchParams.keys()]).toEqual(['q', 'country', 'ad_type', 'start_date', 'end_date']);
+    expect(url.searchParams.get('start_date[min]')).toBe('2026-05-07');
+    expect(url.searchParams.get('start_date[max]')).toBe('2026-08-07');
+    expect(url.searchParams.get('active_status')).toBe('all');
+    expect(url.searchParams.get('is_targeted_country')).toBe('false');
+    expect(url.searchParams.get('media_type')).toBe('all');
+    expect(url.searchParams.get('search_type')).toBe('keyword_unordered');
+    expect([...url.searchParams.keys()]).toEqual(['q', 'active_status', 'ad_type', 'country', 'is_targeted_country', 'media_type', 'search_type', 'start_date[min]', 'start_date[max]']);
   });
   it('captures late GraphQL responses inside the injected window', async () => {
     vi.useFakeTimers();
@@ -240,6 +245,14 @@ describe('Meta Ad scraper', () => {
     expect(result.sourceCount).toBe(1); expect(result.stopReason).toBe('end_of_results');
     expect(page.gotoUrls).toHaveLength(1); expect(page.gotoUrls[0]).toContain('q=diabetes'); expect(page.evaluateCount).toBe(0);
     expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
+  });
+  it('recovers a transient document block with one reload in the same page', async () => {
+    const page = new InstrumentedPage([[documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)], [graphqlResponse([fixtureAd('reloaded')], false)]]);
+    const waits: number[] = [];
+    const result = await scrapeMetaAds({ query: 'reload', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: async (ms) => { waits.push(ms); }, random: () => 0 });
+    expect(result.sourceCount).toBe(1);
+    expect(page.gotoUrls).toHaveLength(2);
+    expect(waits).toContain(1500);
   });
   it('emits browser, search, batch and finish events', async () => {
     const events: string[] = []; const page = new InstrumentedPage([[graphqlResponse([fixtureAd('logged')], false)]]);

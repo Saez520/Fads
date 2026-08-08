@@ -145,7 +145,7 @@ export function classifyNetworkEvidence(evidence: Pick<NetworkEvidence, 'status'
   if ((evidence.hops?.length ?? 0) > 1 || evidence.hops?.some((hop) => hop.destination && hop.destination !== hop.url)) signals.push('redirect hop or changed destination');
   const text = `${evidence.url ?? ''} ${evidence.body ?? ''}`;
   if (/login|log-in|signin|sign-in|checkpoint|auth/i.test(text)) signals.push('login-related URL or body text');
-  if ((evidence.status !== undefined && (DOCUMENT_ERROR_STATUS.has(evidence.status) || evidence.status >= 500)) || /blocked|forbidden|rate.?limit|challenge|denied/i.test(text)) signals.push('HTTP block status or block-related text');
+  if ((evidence.status !== undefined && (DOCUMENT_ERROR_STATUS.has(evidence.status) || evidence.status >= 500)) || /rd_challenge|blocked|forbidden|rate.?limit|challenge|denied/i.test(text)) signals.push('HTTP block status or block-related text');
   if (evidence.kind === 'network_failure' || evidence.failureText) signals.push(evidence.failureText ? `request failure: ${evidence.failureText}` : 'request failed without a response');
   if (signals.some((signal) => signal.startsWith('redirect'))) return { label: 'possible_redirect', signals };
   if (signals.some((signal) => signal.startsWith('login'))) return { label: 'possible_login', signals };

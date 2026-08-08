@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graphql-response-fixture.js';
-import { parseGraphQlResponse } from '../../src/scraper/graphql-response-parser.js';
+import { parseGraphQlResponse, parseSsrSearchResultsConnection } from '../../src/scraper/graphql-response-parser.js';
 
 describe('GraphQL response parser', () => {
   it('extracts and deduplicates collated ads', () => {
@@ -19,4 +19,12 @@ describe('GraphQL response parser', () => {
     expect(parseGraphQlResponse(payload).classification).toBe('unrecognized');
   });
   it('does not classify final rate limits as empty', () => expect(parseGraphQlResponse(rateLimitResponse).classification).toBe('finalRateLimit'));
+  it.each([
+    '<script>{"bootstrap":{"search_results_connection":{"edges":[{"node":{"collated_results":[{"ad_archive_id":"ssr-1"}]}}],"page_info":{"has_next_page":true}}}}</script>',
+    '<script>"ignored"</script><script>{"data":{"nested":{"search_results_connection":{"edges":[],"page_info":{"has_next_page":false}}}}}</script>',
+    '<div><script type="application/json">{"x":[{"search_results_connection":{"edges":[{"node":{"collated_results":[{"ad_archive_id":"ssr-2"}]}}],"page_info":{"has_next_page":false}}}]}</script></div>',
+  ])('extracts SSR connections from arbitrary nested positions', (html) => expect(parseSsrSearchResultsConnection(html).classification).not.toBe('absent'));
+  it('does not turn incomplete SSR into an empty batch', () => {
+    expect(parseSsrSearchResultsConnection('<script>{"search_results_connection":{"edges":[]}}</script>')).toMatchObject({ classification: 'incomplete' });
+  });
 });

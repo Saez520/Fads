@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
 import { normalizeAndFingerprintAd } from '../domain/fingerprints.js';
 import type { NormalizedAdRecord } from '../domain/ad-model.js';
-import { isGraphQlEndpoint, parseGraphQlResponse } from './graphql-response-parser.js';
+import { isGraphQlEndpoint, parseGraphQlResponse, parseSsrSearchResultsConnection } from './graphql-response-parser.js';
 import { waitForRetry } from './retry-policy.js';
 import { waitForThrottle } from './timing-policy.js';
 import { buildNetworkEvidence, classifyDiagnostic, classifyNetworkEvidence, isEligibleDocument, isGraphQlUrl, networkEvidenceSummary, redirectHops, sanitizeDiagnosticText, type NetworkEvidence } from './network-evidence.js';
@@ -26,7 +26,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const clock = options.clock ?? defaultClock;
   const logger: Logger = options.logger ?? (() => undefined);
   const diagnosticState = options.diagnosticState ?? logger.diagnosticState;
-  const captureTimeoutMs = options.captureTimeoutMs ?? 2000;
+  const captureTimeoutMs = options.captureTimeoutMs ?? 15_000;
   const captureWindow: CaptureWindow = options.captureWindow ?? ((nextGraphQlResponse) => waitForCaptureWindow(nextGraphQlResponse, captureTimeoutMs));
   const maxSourceAds = options.maxSourceAds ?? 1500;
   const diagnosticsEnabled = options.diagnosticsEnabled ?? process.env.NODE_ENV !== 'production';
@@ -70,7 +70,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     let responseReadError: unknown;
     let hasNextPage = true;
     let latestIds = 0;
-    let nextGraphQlResponse: Deferred<void> | undefined;
+    let captureSignal: Deferred<import('./scraper-types.js').CaptureSignal> | undefined;
     const collect = async (evidence: NetworkEvidence): Promise<void> => {
       const bodyBytes = Buffer.byteLength(evidence.body ?? '', 'utf8');
       const chainKey = evidence.hops?.[0]?.url ?? evidence.url;
@@ -93,6 +93,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       networkEvidence.push(evidence);
       networkEvidenceBodyBytes += bodyBytes;
     };
+    const ingestBatch = async (batch: import('./scraper-types.js').ParsedBatch): Promise<void> => {
+      for (const ad of batch.ads) {
+        if (sourceIds.size >= maxSourceAds || sourceIds.has(ad.ad_archive_id)) continue;
+        sourceIds.add(ad.ad_archive_id); latestIds++;
+        records.push(...normalizeAndFingerprintAd(ad));
+      }
+      logger({ type: 'batch', query: request.query, sourceCount: sourceIds.size, count: records.length });
+      if (latestIds > 0 && options.onBatch) await options.onBatch(records);
+    };
     const collectResponse = async (response: BrowserPageResponse): Promise<void> => {
       try {
         const request = response.request?.();
@@ -102,12 +111,27 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         const contentType = headers['content-type'] ?? headers['Content-Type'];
         const isHtml = Boolean(contentType && /text\/html|application\/xhtml\+xml/i.test(contentType));
         const isHttpError = status !== undefined && status >= 400 && status < 600;
-        if (isHttpError) httpBlock = true;
+        const blockStatus = status !== undefined && ([403, 429, 451].includes(status) || status >= 500);
+        if (blockStatus) httpBlock = true;
         const isTextualError = Boolean(contentType && /text\//i.test(contentType));
         const body = status !== undefined && status >= 300 && status < 400 ? undefined : (isHtml || (isHttpError && isTextualError)) && response.text ? await response.text() : undefined;
         const hops = request ? await redirectHops(request) : [];
         await collect(buildNetworkEvidence({ responsePresent: true, status, contentType, url: response.url(), body, hops, kind: 'document', bodyLimitBytes: networkEvidenceBodyLimitBytes }));
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', url: response.url(), status, contentType, resourceType: request?.resourceType?.(), redirectCount: hops.length }, false);
+        const blockText = `${response.url()} ${body ?? ''}`;
+        if (blockStatus || /rd_challenge|challenge|blocked|forbidden/i.test(blockText)) { domSignals.challenge = true; captureSignal?.resolve('challenge_or_http_block'); return; }
+        if (/captcha|log in|login|inicia sesión|checkpoint/i.test(blockText)) { domSignals.captcha = /captcha/i.test(blockText); domSignals.login = !domSignals.captcha; captureSignal?.resolve('captcha_or_login'); return; }
+        if (isHttpError) { captureSignal?.resolve('http_error'); return; }
+        if (body) {
+          const parsed = parseSsrSearchResultsConnection(body);
+          if (parsed.batch) {
+            domSignals.ssrResults = parsed.batch.ads.length > 0;
+            hasNextPage = parsed.batch.hasNextPage;
+            recognizedResponses++;
+            await ingestBatch(parsed.batch);
+            captureSignal?.resolve('ssr_batch');
+          }
+        }
       } catch { diagnosticIncomplete = true; }
     };
     const publishNetworkEvidence = (reason: string, evidence: NetworkEvidence | NetworkEvidence[]): boolean => {
@@ -123,7 +147,6 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       if (!isGraphQlUrl(response.url()) && !isGraphQlEndpoint(response.url())) {
         const task = collectResponse(response); pending.push(task); return;
       }
-      nextGraphQlResponse?.resolve();
       const emitEvidence = async (reason: string, error?: unknown): Promise<void> => {
         let body: string | undefined;
         try { body = response.text ? await response.text() : undefined; } catch { body = undefined; }
@@ -135,7 +158,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       };
       const task = response.json().then(async (payload) => {
         const parsed = parseGraphQlResponse(payload);
-        if (parsed.finalRateLimit) { finalRateLimit = true; return; }
+        if (parsed.finalRateLimit) { finalRateLimit = true; captureSignal?.resolve('http_error'); return; }
         if (!parsed.batch) {
           discardedResponses++;
           await emitEvidence('unrecognized_response');
@@ -143,13 +166,8 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         }
         recognizedResponses++;
         hasNextPage = parsed.batch.hasNextPage;
-        for (const ad of parsed.batch.ads) {
-          if (sourceIds.size >= maxSourceAds || sourceIds.has(ad.ad_archive_id)) continue;
-          sourceIds.add(ad.ad_archive_id); latestIds++;
-          records.push(...normalizeAndFingerprintAd(ad));
-        }
-        logger({ type: 'batch', query: request.query, sourceCount: sourceIds.size, count: records.length });
-        if (latestIds > 0 && options.onBatch) return Promise.resolve(options.onBatch(records));
+        await ingestBatch(parsed.batch);
+        captureSignal?.resolve(parsed.classification === 'empty' ? 'confirmed_empty' : 'recognized_batch');
       }).catch(async (error) => {
         discardedResponses++;
         responseReadError = error;
@@ -170,20 +188,20 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       pending.push(task);
     });
     installRuntimeAdapters(page, (message) => diagnosticEvent(message, message.kind === 'pageerror'));
-    const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
+    const url = buildSearchUrl(request);
     logger({ type: 'search', query: request.query, message: 'search.started' });
     let retryIndex = 0;
-    const action = async (work: () => Promise<unknown>): Promise<void> => {
+    const action = async (work: () => Promise<unknown>, deadline?: number): Promise<import('./scraper-types.js').CaptureSignal> => {
       while (true) {
         try {
           latestIds = 0;
-          nextGraphQlResponse = createDeferred<void>();
+          captureSignal = createDeferred<import('./scraper-types.js').CaptureSignal>();
           await waitForThrottle(sleep, random);
           await work();
           await Promise.all(pending.splice(0));
-          await captureWindow(nextGraphQlResponse.promise);
+          const signal = await waitForSemanticCapture(captureSignal.promise, deadline === undefined ? captureTimeoutMs : Math.max(0, deadline - clock.now()));
           await Promise.all(pending.splice(0));
-          return;
+          return signal;
         }
         catch (error) {
           const delay = await waitForRetry(sleep, retryIndex++);
@@ -192,18 +210,32 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         }
       }
     };
-    await action(() => page!.goto(url));
+    const initialDeadline = clock.now() + captureTimeoutMs;
+    let initialSignal = await action(() => page!.goto(url), initialDeadline);
+    if (initialSignal === 'challenge_or_http_block') {
+      await sleep(1500);
+      // The first block is retained in evidence, but must not condemn a valid second load.
+      httpBlock = false;
+      domSignals.challenge = false;
+      captureSignal = createDeferred<import('./scraper-types.js').CaptureSignal>();
+      await (page!.reload ? page!.reload() : page!.goto(url));
+      await Promise.all(pending.splice(0));
+      initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, initialDeadline - clock.now()));
+    }
+    if (initialSignal === 'challenge_or_http_block') { status = 'bloqueada'; stopReason = 'unrecognized_response'; logger({ type: 'blocked', query: request.query, reason: 'challenge_or_http_block' }); }
+    if (initialSignal === 'http_error') { status = 'incompleta'; stopReason = 'error'; }
+    if (initialSignal === 'captcha_or_login') { status = 'bloqueada'; stopReason = 'unrecognized_response'; }
     if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); }
-    while (!finalRateLimit && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0) {
+    while (!finalRateLimit && status !== 'bloqueada' && initialSignal !== 'timeout' && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0) {
       const previousCount = sourceIds.size;
-      await action(() => page!.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
+      initialSignal = await action(() => page!.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
       if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); break; }
       if (sourceIds.size >= maxSourceAds) { stopReason = 'ad_limit'; break; }
       if (sourceIds.size === previousCount || latestIds === 0) { stopReason = 'no_new_ads'; break; }
     }
     if (!finalRateLimit && sourceIds.size >= maxSourceAds) stopReason = 'ad_limit';
     if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
-    if (!finalRateLimit && (recognizedResponses === 0 || discardedResponses > 0)) {
+    if (!finalRateLimit && status !== 'bloqueada' && (recognizedResponses === 0 || discardedResponses > 0 || initialSignal === 'timeout')) {
       status = 'incompleta';
       stopReason = recognizedResponses === 0 && discardedResponses === 0 ? 'empty_capture' : 'unrecognized_response';
       if (stopReason === 'empty_capture') {
@@ -313,7 +345,7 @@ async function readBrowserMetadata(page: BrowserPage, context: BrowserContext): 
 }
 
 function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence?: NetworkEvidence, networkEvidence: NetworkEvidence[] = [], diagnosticIncomplete = false): ExtractionDiagnostic {
-  const alternativeSearchUrl = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
+  const alternativeSearchUrl = buildSearchUrl(request);
   return {
     userMessage: hasRecords
       ? 'La captura quedó inconclusa; se conservaron resultados parciales. Puede continuar con la búsqueda manual.'
@@ -326,8 +358,13 @@ function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence
   };
 }
 
-function toStartEpoch(value: string): number { const [year, month, day] = value.split('-').map(Number); return Date.UTC(year, month - 1, day) / 1000; }
-function toEndEpoch(value: string): number { return toStartEpoch(value) + 86_399; }
+function buildSearchUrl(request: ScrapeRequest): string {
+  const params = new URLSearchParams();
+  params.set('q', request.query); params.set('active_status', 'all'); params.set('ad_type', request.adType); params.set('country', request.country);
+  params.set('is_targeted_country', 'false'); params.set('media_type', 'all'); params.set('search_type', 'keyword_unordered');
+  params.set('start_date[min]', request.dateFrom); params.set('start_date[max]', request.dateTo);
+  return `https://www.facebook.com/ads/library/?${params.toString()}`;
+}
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value?: T | PromiseLike<T>) => void; reject: (error: unknown) => void };
 function createDeferred<T>(): Deferred<T> {
@@ -342,4 +379,12 @@ async function waitForCaptureWindow(nextGraphQlResponse: Promise<void>, timeoutM
   const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); });
   await Promise.race([nextGraphQlResponse, timeout]);
   if (timer !== undefined) clearTimeout(timer);
+}
+
+async function waitForSemanticCapture(signal: Promise<import('./scraper-types.js').CaptureSignal>, timeoutMs: number): Promise<import('./scraper-types.js').CaptureSignal> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<import('./scraper-types.js').CaptureSignal>((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
+  const result = await Promise.race([signal, timeout]);
+  if (timer !== undefined) clearTimeout(timer);
+  return result;
 }

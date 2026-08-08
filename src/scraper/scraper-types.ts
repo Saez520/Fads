@@ -34,6 +34,7 @@ export interface Clock { now(): number }
 export type Sleeper = (milliseconds: number) => Promise<void>;
 export type Random = () => number;
 export type CaptureWindow = (nextGraphQlResponse: Promise<void>) => Promise<void>;
+export type CaptureSignal = 'recognized_batch' | 'ssr_batch' | 'confirmed_empty' | 'challenge_or_http_block' | 'captcha_or_login' | 'http_error' | 'timeout';
 export interface ResultWriter { write(envelope: ScrapeEnvelope): Promise<void> }
 
 export function extractionStatusFor(hasError: boolean, recordCount: number): ExtractionStatus {
@@ -70,6 +71,7 @@ export interface BrowserPage {
   onConsole?(listener: (message: BrowserConsoleMessage) => void | Promise<void>): void;
   onPageError?(listener: (error: Error) => void | Promise<void>): void;
   goto(url: string): Promise<unknown>;
+  reload?(): Promise<unknown>;
   evaluate(script: () => void): Promise<unknown>;
   close(): Promise<void>;
   url?(): string;
@@ -106,6 +108,8 @@ export interface ParsedBatch { ads: AdInput[]; hasNextPage: boolean; endCursor: 
 export interface GraphQlError { message?: string; code?: number; severity?: string; extensions?: { is_final?: boolean; [key: string]: unknown } }
 export type GraphQlClassification = 'recognized' | 'empty' | 'unrecognized' | 'finalRateLimit';
 export interface GraphQlParseResult { batch?: ParsedBatch; errors: GraphQlError[]; relevant: boolean; finalRateLimit: boolean; classification: GraphQlClassification; rawResponse: unknown }
+export type SsrParseClassification = 'recognized' | 'empty' | 'incomplete' | 'absent';
+export interface SsrParseResult { batch?: ParsedBatch; classification: SsrParseClassification }
 
 export function validateScrapeRequest(value: unknown): ScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid scrape request');
