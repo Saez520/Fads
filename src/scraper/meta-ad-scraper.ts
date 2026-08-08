@@ -4,15 +4,17 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 import { isGraphQlEndpoint, parseGraphQlResponse } from './graphql-response-parser.js';
 import { waitForRetry } from './retry-policy.js';
 import { waitForThrottle } from './timing-policy.js';
-import { buildNetworkEvidence, networkEvidenceSummary, type NetworkEvidence } from './network-evidence.js';
+import { buildNetworkEvidence, classifyNetworkEvidence, isEligibleDocument, isGraphQlUrl, networkEvidenceSummary, redirectHops, type NetworkEvidence } from './network-evidence.js';
 import type { AdInput } from '../domain/ad-input.js';
-import { extractionStatusFor, sanitizeExtractionError, type Browser, type BrowserLauncher, type BrowserPage, type CaptureWindow, type Clock, type ExtractionDiagnostic, type ExtractionStatus, type Logger, type MetaAdScraperOptions, type Random, type ScrapeRequest, type ScrapeStatus, type Sleeper, type StopReason } from './scraper-types.js';
+import { extractionStatusFor, sanitizeExtractionError, type Browser, type BrowserLauncher, type BrowserPage, type BrowserPageRequest, type BrowserPageResponse, type CaptureWindow, type Clock, type ExtractionDiagnostic, type ExtractionStatus, type Logger, type MetaAdScraperOptions, type Random, type ScrapeRequest, type ScrapeStatus, type Sleeper, type StopReason } from './scraper-types.js';
 export type { MetaAdScraperOptions } from './scraper-types.js';
 
 const defaultLauncher: BrowserLauncher = { launch: (options) => chromium.launch(options) as unknown as Promise<Browser> };
 const defaultSleep: Sleeper = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const defaultClock: Clock = { now: () => performance.now() };
 const defaultRandom: Random = () => Math.random();
+const MAX_NETWORK_EVIDENCE_COUNT = 5;
+const MAX_NETWORK_EVIDENCE_BODY_BYTES = 160 * 1024;
 
 export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number; extractionStatus: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -39,6 +41,9 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   let exhaustedRetries = false;
   let primaryError: unknown;
   let latestEvidence: NetworkEvidence | undefined;
+  const networkEvidence: NetworkEvidence[] = [];
+  let networkEvidenceBodyBytes = 0;
+  let diagnosticIncomplete = false;
   logger({ type: 'start', query: request.query });
   try {
     browser = await launcher.launch({ headless: true });
@@ -53,8 +58,47 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     let hasNextPage = true;
     let latestIds = 0;
     let nextGraphQlResponse: Deferred<void> | undefined;
+    const collect = async (evidence: NetworkEvidence): Promise<void> => {
+      const bodyBytes = Buffer.byteLength(evidence.body ?? '', 'utf8');
+      const chainKey = evidence.hops?.[0]?.url ?? evidence.url;
+      const existingIndex = networkEvidence.findIndex((existing) => (existing.hops?.[0]?.url ?? existing.url) === chainKey);
+      if (existingIndex >= 0) {
+        const existing = networkEvidence[existingIndex];
+        if ((existing.hops?.length ?? 0) >= (evidence.hops?.length ?? 0)) return;
+        if (networkEvidenceBodyBytes - Buffer.byteLength(existing.body ?? '', 'utf8') + bodyBytes > MAX_NETWORK_EVIDENCE_BODY_BYTES) {
+          diagnosticIncomplete = true;
+          return;
+        }
+        networkEvidenceBodyBytes -= Buffer.byteLength(existing.body ?? '', 'utf8');
+        networkEvidence.splice(existingIndex, 1);
+      } else if (networkEvidence.length >= MAX_NETWORK_EVIDENCE_COUNT) return;
+      if (networkEvidenceBodyBytes + bodyBytes > MAX_NETWORK_EVIDENCE_BODY_BYTES) {
+        diagnosticIncomplete = true;
+        return;
+      }
+      evidence.classification = classifyNetworkEvidence(evidence);
+      networkEvidence.push(evidence);
+      networkEvidenceBodyBytes += bodyBytes;
+    };
+    const collectResponse = async (response: BrowserPageResponse): Promise<void> => {
+      try {
+        const request = response.request?.();
+        if (!isEligibleDocument(request)) return;
+        const status = response.status?.();
+        const headers = response.headers ? response.headers() : {};
+        const contentType = headers['content-type'] ?? headers['Content-Type'];
+        const isHtml = Boolean(contentType && /text\/html|application\/xhtml\+xml/i.test(contentType));
+        const isHttpError = status !== undefined && status >= 400 && status < 600;
+        const isTextualError = Boolean(contentType && /text\//i.test(contentType));
+        const body = status !== undefined && status >= 300 && status < 400 ? undefined : (isHtml || (isHttpError && isTextualError)) && response.text ? await response.text() : undefined;
+        const hops = request ? await redirectHops(request) : [];
+        await collect(buildNetworkEvidence({ responsePresent: true, status, contentType, url: response.url(), body, hops, kind: 'document', bodyLimitBytes: networkEvidenceBodyLimitBytes }));
+      } catch { diagnosticIncomplete = true; }
+    };
     page.on('response', (response) => {
-      if (!isGraphQlEndpoint(response.url())) return;
+      if (!isGraphQlUrl(response.url()) && !isGraphQlEndpoint(response.url())) {
+        const task = collectResponse(response); pending.push(task); return;
+      }
       nextGraphQlResponse?.resolve();
       const emitEvidence = async (reason: string, error?: unknown): Promise<void> => {
         let body: string | undefined;
@@ -62,7 +106,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         const headers = response.headers ? response.headers() : {};
         const contentType = headers['content-type'] ?? headers['Content-Type'];
         latestEvidence = buildNetworkEvidence({ responsePresent: true, status: response.status?.(), contentType, url: response.url(), body, bodyLimitBytes: networkEvidenceBodyLimitBytes });
-        logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason, evidence: latestEvidence });
+        try { logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason, evidence: latestEvidence }); } catch { diagnosticIncomplete = true; }
       };
       const task = response.json().then(async (payload) => {
         const parsed = parseGraphQlResponse(payload);
@@ -86,6 +130,16 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         responseReadError = error;
         await emitEvidence('response_read_error', error);
       });
+      pending.push(task);
+    });
+    page.on('requestfailed', (request: BrowserPageRequest) => {
+      const task = (async () => {
+        try {
+          if (!isEligibleDocument(request)) return;
+          const failureText = request.failure?.()?.errorText;
+          await collect(buildNetworkEvidence({ responsePresent: false, url: request.url(), failureText, kind: 'network_failure' }));
+        } catch { diagnosticIncomplete = true; }
+      })();
       pending.push(task);
     });
     const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
@@ -123,11 +177,14 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
     if (!finalRateLimit && (recognizedResponses === 0 || discardedResponses > 0)) {
       status = 'incompleta';
-      stopReason = 'unrecognized_response';
+      stopReason = recognizedResponses === 0 ? 'empty_capture' : 'unrecognized_response';
       if (discardedResponses === 0) {
         const evidence = buildNetworkEvidence({ responsePresent: false, url: page?.url?.(), bodyLimitBytes: networkEvidenceBodyLimitBytes });
         latestEvidence = evidence;
-        logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason: 'empty_capture', evidence });
+        try { logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason: 'empty_capture', evidence }); } catch { diagnosticIncomplete = true; }
+      }
+      if (stopReason === 'empty_capture' && networkEvidence.length > 0) {
+        try { logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason: 'empty_capture', evidence: networkEvidence }); } catch { diagnosticIncomplete = true; }
       }
     }
   } catch (error) {
@@ -142,15 +199,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   }
   const diagnostic = primaryError !== undefined
     ? sanitizeExtractionError(primaryError, records.length > 0)
-     : stopReason === 'unrecognized_response'
-        ? captureDiagnostic(request, records.length > 0, latestEvidence)
+      : stopReason === 'unrecognized_response' || stopReason === 'empty_capture'
+         ? captureDiagnostic(request, records.length > 0, latestEvidence, networkEvidence, diagnosticIncomplete)
       : undefined;
-  const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response', records.length), ...(diagnostic ? { diagnostic } : {}) };
+  const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response' || stopReason === 'empty_capture', records.length), ...(diagnostic ? { diagnostic } : {}) };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
 }
 
-function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence?: NetworkEvidence): ExtractionDiagnostic {
+function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence?: NetworkEvidence, networkEvidence: NetworkEvidence[] = [], diagnosticIncomplete = false): ExtractionDiagnostic {
   const alternativeSearchUrl = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
   return {
     userMessage: hasRecords
@@ -159,6 +216,8 @@ function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence
     technicalDetail: 'Meta no devolvió una respuesta GraphQL interpretable durante la ventana de captura.',
     alternativeSearchUrl,
     ...(evidence ? networkEvidenceSummary(evidence) : {}),
+    ...(networkEvidence.length ? { networkEvidence: networkEvidence.map(networkEvidenceSummary), classifications: networkEvidence.map((item) => item.classification).filter((item): item is NonNullable<typeof item> => item !== undefined) } : {}),
+    ...(diagnosticIncomplete ? { diagnosticIncomplete: true } : {}),
   };
 }
 

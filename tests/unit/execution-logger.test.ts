@@ -33,6 +33,7 @@ describe('ExecutionLogger', () => {
     const execution = await readFile(logger.executionPath, 'utf8');
     const errors = await readFile(logger.errorPath, 'utf8');
     expect(execution).toContain('scraper.network_evidence');
+    expect(execution).toContain('sanitized');
     expect(errors).toContain('e-1');
     expect(errors).toContain('sanitized');
   });

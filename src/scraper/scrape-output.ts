@@ -30,7 +30,26 @@ function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
     && (diagnostic.responsePresent === undefined || typeof diagnostic.responsePresent === 'boolean')
     && (diagnostic.status === undefined || (typeof diagnostic.status === 'number' && Number.isFinite(diagnostic.status)))
     && (diagnostic.contentType === undefined || typeof diagnostic.contentType === 'string')
-    && (diagnostic.url === undefined || typeof diagnostic.url === 'string');
+    && (diagnostic.url === undefined || typeof diagnostic.url === 'string')
+    && (diagnostic.diagnosticIncomplete === undefined || typeof diagnostic.diagnosticIncomplete === 'boolean')
+    && (diagnostic.networkEvidence === undefined || (Array.isArray(diagnostic.networkEvidence) && diagnostic.networkEvidence.length <= 5 && diagnostic.networkEvidence.every(isNetworkEvidenceSummary)))
+    && (diagnostic.classifications === undefined || (Array.isArray(diagnostic.classifications) && diagnostic.classifications.every(isClassification)));
+}
+
+function isClassification(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return ['possible_redirect', 'possible_login', 'possible_http_block', 'possible_network_failure', 'unknown'].includes(item.label as string)
+    && Array.isArray(item.signals) && item.signals.every((signal) => typeof signal === 'string');
+}
+
+function isNetworkEvidenceSummary(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  if (typeof item.evidenceId !== 'string' || typeof item.logReference !== 'string' || typeof item.responsePresent !== 'boolean') return false;
+  if (item.status !== undefined && (typeof item.status !== 'number' || !Number.isFinite(item.status))) return false;
+  if (item.hops !== undefined && (!Array.isArray(item.hops) || item.hops.some((hop) => !hop || typeof hop !== 'object' || typeof (hop as Record<string, unknown>).url !== 'string'))) return false;
+  return item.classification === undefined || isClassification(item.classification);
 }
 
 export function createScrapeEnvelope(query: string, records: NormalizedAdRecord[], summary: ScrapeSummary): ScrapeEnvelope {

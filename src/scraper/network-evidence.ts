@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { BrowserPageRequest, NetworkEvidenceClassification, NetworkEvidenceHop } from './scraper-types.js';
 
 export interface NetworkEvidenceInput {
   responsePresent: boolean;
@@ -7,6 +8,9 @@ export interface NetworkEvidenceInput {
   url?: string;
   body?: string;
   bodyLimitBytes?: number;
+  kind?: 'document' | 'network_failure';
+  failureText?: string;
+  hops?: NetworkEvidenceHop[];
 }
 
 export interface NetworkEvidence {
@@ -18,9 +22,16 @@ export interface NetworkEvidence {
   url?: string;
   body?: string;
   bodyTruncated: boolean;
+  kind?: 'document' | 'network_failure';
+  failureText?: string;
+  hops?: NetworkEvidenceHop[];
+  classification?: NetworkEvidenceClassification;
 }
 
 export type NetworkEvidenceSummary = Omit<NetworkEvidence, 'body' | 'bodyTruncated'>;
+
+const MAX_BODY_BYTES = 32 * 1024;
+const DOCUMENT_ERROR_STATUS = new Set([403, 429, 451]);
 
 // Match complete credential field names, including the common snake/kebab/camel
 // case variants, rather than any field that merely contains a sensitive word.
@@ -52,11 +63,16 @@ export function sanitizeNetworkUrl(url: string): string {
 }
 
 function truncateUtf8(value: string, limit: number): { value: string; truncated: boolean } {
-  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 32 * 1024;
+  const safeLimit = effectiveBodyLimit(limit);
   if (Buffer.byteLength(value, 'utf8') <= safeLimit) return { value, truncated: false };
   let end = Math.min(value.length, safeLimit);
   while (end > 0 && Buffer.byteLength(value.slice(0, end), 'utf8') > safeLimit) end--;
   return { value: value.slice(0, end), truncated: true };
+}
+
+export function effectiveBodyLimit(limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit)) return MAX_BODY_BYTES;
+  return Math.min(Math.max(Math.floor(limit), 1), MAX_BODY_BYTES);
 }
 
 export function buildNetworkEvidence(input: NetworkEvidenceInput): NetworkEvidence {
@@ -66,6 +82,9 @@ export function buildNetworkEvidence(input: NetworkEvidenceInput): NetworkEviden
     logReference: `scraper.network_evidence:${evidenceId}`,
     responsePresent: input.responsePresent,
     bodyTruncated: false,
+    ...(input.kind ? { kind: input.kind } : {}),
+    ...(input.failureText ? { failureText: redactNetworkText(input.failureText) } : {}),
+    ...(input.hops ? { hops: input.hops } : {}),
     ...(input.status !== undefined ? { status: input.status } : {}),
     ...(input.contentType ? { contentType: redactNetworkText(input.contentType) } : {}),
     ...(input.url ? { url: sanitizeNetworkUrl(input.url) } : {}),
@@ -76,6 +95,47 @@ export function buildNetworkEvidence(input: NetworkEvidenceInput): NetworkEviden
     evidence.bodyTruncated = limited.truncated;
   }
   return evidence;
+}
+
+export function isEligibleDocument(request: BrowserPageRequest | undefined): boolean {
+  if (!request) return false;
+  const resourceType = request.resourceType?.();
+  return resourceType === 'document' && !isGraphQlUrl(request.url());
+}
+
+export function isGraphQlUrl(url: string): boolean { return /(?:\/|\?|&)graphql(?:\/|\?|&|$)/i.test(url) || /graphql/i.test(url); }
+
+export async function redirectHops(request: BrowserPageRequest): Promise<NetworkEvidenceHop[]> {
+  const chain: BrowserPageRequest[] = [];
+  let current: BrowserPageRequest | null | undefined = request;
+  while (current) {
+    chain.unshift(current);
+    current = current.redirectedFrom?.() ?? null;
+  }
+  const hops: NetworkEvidenceHop[] = [];
+  for (let index = 0; index < chain.length; index++) {
+    const item = chain[index];
+    let status: number | undefined;
+    try { status = (await item.response?.())?.status?.(); } catch { status = undefined; }
+    const destination = chain[index + 1]?.url();
+    const hop = { url: sanitizeNetworkUrl(item.url()), ...(status !== undefined ? { status } : {}), ...(destination ? { destination: sanitizeNetworkUrl(destination) } : {}) };
+    if (!hops.some((existing) => JSON.stringify(existing) === JSON.stringify(hop))) hops.push(hop);
+  }
+  return hops;
+}
+
+export function classifyNetworkEvidence(evidence: Pick<NetworkEvidence, 'status' | 'url' | 'body' | 'failureText' | 'hops' | 'kind'>): NetworkEvidenceClassification {
+  const signals: string[] = [];
+  if ((evidence.hops?.length ?? 0) > 1 || evidence.hops?.some((hop) => hop.destination && hop.destination !== hop.url)) signals.push('redirect hop or changed destination');
+  const text = `${evidence.url ?? ''} ${evidence.body ?? ''}`;
+  if (/login|log-in|signin|sign-in|checkpoint|auth/i.test(text)) signals.push('login-related URL or body text');
+  if ((evidence.status !== undefined && (DOCUMENT_ERROR_STATUS.has(evidence.status) || evidence.status >= 500)) || /blocked|forbidden|rate.?limit|challenge|denied/i.test(text)) signals.push('HTTP block status or block-related text');
+  if (evidence.kind === 'network_failure' || evidence.failureText) signals.push(evidence.failureText ? `request failure: ${evidence.failureText}` : 'request failed without a response');
+  if (signals.some((signal) => signal.startsWith('redirect'))) return { label: 'possible_redirect', signals };
+  if (signals.some((signal) => signal.startsWith('login'))) return { label: 'possible_login', signals };
+  if (signals.some((signal) => signal.startsWith('HTTP'))) return { label: 'possible_http_block', signals };
+  if (signals.some((signal) => signal.startsWith('request'))) return { label: 'possible_network_failure', signals };
+  return { label: 'unknown', signals: ['no explicit diagnostic signal'] };
 }
 
 export function networkEvidenceSummary(evidence: NetworkEvidence): NetworkEvidenceSummary {

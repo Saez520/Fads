@@ -6,14 +6,14 @@ import { decodeNormalizedAd } from '../../src/data/json-codec.js';
 import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graphql-response-fixture.js';
 import { decodeScrapeEnvelope } from '../../src/scraper/scrape-output.js';
 import { runScrape } from '../../src/scraper/scrape-runner.js';
-import type { Browser, BrowserContext, BrowserLauncher, BrowserPage, BrowserPageResponse, ResultWriter, ScrapeEnvelope } from '../../src/scraper/scraper-types.js';
+import type { Browser, BrowserContext, BrowserLauncher, BrowserPage, BrowserPageRequest, BrowserPageResponse, ResultWriter, ScrapeEnvelope } from '../../src/scraper/scraper-types.js';
 import { validateScrapeRequest } from '../../src/scraper/scraper-types.js';
 import { ExecutionLogger } from '../../src/mcp/execution-logger.js';
 
 class RunnerPage implements BrowserPage {
   private listener?: (response: BrowserPageResponse) => void | Promise<void>;
   constructor(private readonly payloads: unknown[][], private readonly failGoto = false) {}
-  on(_event: 'response', listener: (response: BrowserPageResponse) => void | Promise<void>): void { this.listener = listener; }
+  on(event: 'response' | 'requestfailed', listener: ((response: BrowserPageResponse) => void | Promise<void>) | ((request: BrowserPageRequest) => void | Promise<void>)): void { if (event === 'response') this.listener = listener as (response: BrowserPageResponse) => void | Promise<void>; }
   async goto(): Promise<void> { if (this.failGoto) throw new Error('Authorization: Bearer secret-token /Users/local/app.ts'); this.emit(this.payloads.shift() ?? []); }
   async evaluate(): Promise<void> { this.emit(this.payloads.shift() ?? []); }
   async close(): Promise<void> {}
@@ -52,7 +52,7 @@ describe('scrape runner and persisted output', () => {
   it('rejects filters before browser creation', () => expect(() => validateScrapeRequest({ query: 'x', filters: {} })).toThrow());
   it('classifies a capture without an interpretable response as inconclusive', async () => {
     const result = await runScrape({ query: 'empty', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([[]]), undefined as never), captureTimeoutMs: 1 });
-    expect(result).toMatchObject({ incomplete: true, extractionStatus: 'fallida', summary: { count: 0, status: 'incompleta', extractionStatus: 'fallida', stopReason: 'unrecognized_response' } });
+     expect(result).toMatchObject({ incomplete: true, extractionStatus: 'fallida', summary: { count: 0, status: 'incompleta', extractionStatus: 'fallida', stopReason: 'empty_capture' } });
     expect(result.diagnostic?.alternativeSearchUrl).toContain('q=empty');
   });
   it('keeps evidence summaries in the persisted envelope without a body', async () => {

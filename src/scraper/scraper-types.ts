@@ -3,8 +3,11 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 
 export type ScrapeStatus = 'completa' | 'incompleta' | 'bloqueada';
 export type ExtractionStatus = 'completada' | 'fallida' | 'parcial';
-export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'unrecognized_response' | 'error';
-export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string; evidenceId?: string; logReference?: string; responsePresent?: boolean; status?: number; contentType?: string; url?: string }
+export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'unrecognized_response' | 'empty_capture' | 'error';
+export interface NetworkEvidenceClassification { label: 'possible_redirect' | 'possible_login' | 'possible_http_block' | 'possible_network_failure' | 'unknown'; signals: string[] }
+export interface NetworkEvidenceHop { url: string; status?: number; destination?: string }
+export interface NetworkEvidenceSummary { evidenceId: string; logReference: string; responsePresent: boolean; status?: number; contentType?: string; url?: string; kind?: 'document' | 'network_failure'; failureText?: string; hops?: NetworkEvidenceHop[]; classification?: NetworkEvidenceClassification }
+export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string; evidenceId?: string; logReference?: string; responsePresent?: boolean; status?: number; contentType?: string; url?: string; networkEvidence?: NetworkEvidenceSummary[]; classifications?: NetworkEvidenceClassification[]; diagnosticIncomplete?: boolean }
 
 export interface ScrapeRequest { query: string; country: string; dateFrom: string; dateTo: string; adType: 'all' }
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
@@ -44,9 +47,11 @@ export function sanitizeExtractionError(error: unknown, hasRecords: boolean): Ex
   return { userMessage, technicalDetail };
 }
 
-export interface BrowserPageResponse { url(): string; json(): Promise<unknown>; status?(): number; headers?(): Record<string, string>; text?(): Promise<string>; allHeaders?(): Promise<Record<string, string>> }
+export interface BrowserPageRequest { url(): string; redirectedFrom?(): BrowserPageRequest | null; resourceType?(): string; failure?(): { errorText?: string } | null; response?(): Promise<BrowserPageResponse | null> }
+export interface BrowserPageResponse { url(): string; json(): Promise<unknown>; request?(): BrowserPageRequest; status?(): number; headers?(): Record<string, string>; text?(): Promise<string>; allHeaders?(): Promise<Record<string, string>> }
 export interface BrowserPage {
   on(event: 'response', listener: (response: BrowserPageResponse) => void | Promise<void>): void;
+  on(event: 'requestfailed', listener: (request: BrowserPageRequest) => void | Promise<void>): void;
   goto(url: string): Promise<unknown>;
   evaluate(script: () => void): Promise<unknown>;
   close(): Promise<void>;
