@@ -80,7 +80,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       });
       pending.push(task);
     });
-    const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query }).toString()}`;
+    const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
     logger({ type: 'search', query: request.query, message: 'search.started' });
     let retryIndex = 0;
     const action = async (work: () => Promise<unknown>): Promise<void> => {
@@ -131,15 +131,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const diagnostic = primaryError !== undefined
     ? sanitizeExtractionError(primaryError, records.length > 0)
     : diagnosticsEnabled && stopReason === 'unrecognized_response'
-      ? captureDiagnostic(request.query, records.length > 0)
+       ? captureDiagnostic(request, records.length > 0)
       : undefined;
   const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response', records.length), ...(diagnostic ? { diagnostic } : {}) };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
 }
 
-function captureDiagnostic(query: string, hasRecords: boolean): ExtractionDiagnostic {
-  const alternativeSearchUrl = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: query }).toString()}`;
+function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean): ExtractionDiagnostic {
+  const alternativeSearchUrl = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
   return {
     userMessage: hasRecords
       ? 'La captura quedó inconclusa; se conservaron resultados parciales. Puede continuar con la búsqueda manual.'
@@ -148,6 +148,9 @@ function captureDiagnostic(query: string, hasRecords: boolean): ExtractionDiagno
     alternativeSearchUrl,
   };
 }
+
+function toStartEpoch(value: string): number { const [year, month, day] = value.split('-').map(Number); return Date.UTC(year, month - 1, day) / 1000; }
+function toEndEpoch(value: string): number { return toStartEpoch(value) + 86_399; }
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value?: T | PromiseLike<T>) => void; reject: (error: unknown) => void };
 function createDeferred<T>(): Deferred<T> {

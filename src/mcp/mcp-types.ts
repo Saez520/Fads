@@ -11,9 +11,9 @@ export interface PageInfo { limit: number; nextCursor: string | null; total: num
 export type TaskStatus = 'pendiente' | 'ejecutando' | 'esperando_confirmacion' | 'completada' | 'parcial' | 'fallida' | 'interrumpida';
 export interface TaskProgress { etapa: string; procesados: number; total?: number }
 export interface TaskError { codigo: McpErrorCode; mensaje: string; detalle?: ExtractionDiagnostic | unknown }
-export interface McpTask { taskId: string; query: string; filtros: McpFilters; forceRelaunch?: boolean; status: TaskStatus; createdAt: string; updatedAt: string; progress: TaskProgress; searchId?: string; result?: SearchResult; error?: TaskError }
+export interface McpTask { taskId: string; query: string; country: string; dateFrom: string; dateTo: string; adType: 'all'; filtros: McpFilters; forceRelaunch?: boolean; status: TaskStatus; createdAt: string; updatedAt: string; progress: TaskProgress; searchId?: string; result?: SearchResult; error?: TaskError }
 export type McpTaskIdGenerator = (query: string) => string;
-export interface StartSearchInput { query: string; filtros?: McpFilters; forceRelaunch?: boolean }
+export interface StartSearchInput { query: string; country: string; dateFrom: string; dateTo: string; adType: 'all'; filtros?: McpFilters; forceRelaunch?: boolean }
 export interface SearchResult { searchId: string; query: string; createdAt: string; status: ExtractionStatus; count: number; durationMs: number; warnings: string[]; errors: string[]; diagnostic?: ExtractionDiagnostic }
 export interface ExtractionSummary { searchId: string; query: string; createdAt: string; status: string; extractionStatus?: ExtractionStatus; totalRecords: number; durationMs: number; diagnostic?: ExtractionDiagnostic }
 export interface FingerprintGroup { fingerprint: string; count: number; ejemplo?: NormalizedAdRecord; variantes?: Array<NormalizedAdRecord['copy']> }

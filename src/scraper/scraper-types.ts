@@ -6,7 +6,7 @@ export type ExtractionStatus = 'completada' | 'fallida' | 'parcial';
 export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'unrecognized_response' | 'error';
 export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string }
 
-export interface ScrapeRequest { query: string }
+export interface ScrapeRequest { query: string; country: string; dateFrom: string; dateTo: string; adType: 'all' }
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 
@@ -75,8 +75,26 @@ export interface GraphQlParseResult { batch?: ParsedBatch; errors: GraphQlError[
 export function validateScrapeRequest(value: unknown): ScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid scrape request');
   const input = value as Record<string, unknown>;
-  if (Object.keys(input).length !== 1 || !Object.hasOwn(input, 'query') || typeof input.query !== 'string' || input.query.trim() === '') {
-    throw new Error('Invalid scrape request: query must be a non-empty string and no extra properties are allowed');
-  }
-  return { query: input.query.trim() };
+  return validateStructuredRequest(input, 'scrape request');
+}
+
+export function validateStructuredRequest(value: unknown, context = 'solicitud'): ScrapeRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${context} inválida: debe ser un objeto.`);
+  const input = value as Record<string, unknown>;
+  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType'];
+  if (Object.keys(input).some((key) => !expected.includes(key))) throw new Error(`${context} inválida: no se permiten campos desconocidos.`);
+  if (typeof input.query !== 'string' || input.query.trim() === '') throw new Error('query debe ser un texto no vacío.');
+  if (typeof input.country !== 'string' || !/^[A-Z]{2}$/.test(input.country)) throw new Error('country debe tener exactamente dos letras ASCII mayúsculas.');
+  validateCalendarDate(input.dateFrom, 'dateFrom');
+  validateCalendarDate(input.dateTo, 'dateTo');
+  if ((input.dateFrom as string) > (input.dateTo as string)) throw new Error('dateFrom no puede ser posterior a dateTo.');
+  if (input.adType !== 'all') throw new Error("adType debe ser 'all'.");
+  return { query: input.query.trim(), country: input.country, dateFrom: input.dateFrom as string, dateTo: input.dateTo as string, adType: 'all' };
+}
+
+function validateCalendarDate(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${field} debe tener formato YYYY-MM-DD y ser una fecha real.`);
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) throw new Error(`${field} debe ser una fecha real.`);
 }

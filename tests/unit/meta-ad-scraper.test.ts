@@ -42,11 +42,25 @@ describe('extraction diagnostic sanitization', () => {
 });
 
 describe('Meta Ad scraper', () => {
+  it('builds the filtered URL from structured fields without polluting the query', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'café especialidad', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(page.gotoUrls[0]).toContain('q=caf%C3%A9+especialidad');
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('q')).toBe('café especialidad');
+    expect(url.searchParams.get('q')).not.toContain('Colombia');
+    expect(url.searchParams.get('q')).not.toContain('últimos 3 meses');
+    expect(url.searchParams.get('country')).toBe('CO');
+    expect(url.searchParams.get('ad_type')).toBe('all');
+    expect(url.searchParams.get('start_date')).toBe('1778112000');
+    expect(url.searchParams.get('end_date')).toBe('1786147199');
+    expect([...url.searchParams.keys()]).toEqual(['q', 'country', 'ad_type', 'start_date', 'end_date']);
+  });
   it('captures late GraphQL responses inside the injected window', async () => {
     vi.useFakeTimers();
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], false)]], 0, 25);
     const counters = { contextClose: 0, browserClose: 0 };
-    const scraping = scrapeMetaAds({ query: 'diabetes' }, { launcher: fakeLauncher(page, counters), sleep: noWait, random: () => 0 });
+    const scraping = scrapeMetaAds({ query: 'diabetes', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, counters), sleep: noWait, random: () => 0 });
     await vi.advanceTimersByTimeAsync(25);
     const result = await scraping;
     expect(result.sourceCount).toBe(1); expect(result.stopReason).toBe('end_of_results');
@@ -55,47 +69,47 @@ describe('Meta Ad scraper', () => {
   });
   it('emits browser, search, batch and finish events', async () => {
     const events: string[] = []; const page = new InstrumentedPage([[graphqlResponse([fixtureAd('logged')], false)]]);
-    await scrapeMetaAds({ query: 'logged' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event.type) });
+    await scrapeMetaAds({ query: 'logged', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event.type) });
     expect(events).toEqual(expect.arrayContaining(['start', 'browser', 'search', 'batch', 'finish']));
   });
   it('times out an action without GraphQL and still cleans up', async () => {
     vi.useFakeTimers();
     const page = new InstrumentedPage([[]]); const counters = { contextClose: 0, browserClose: 0 };
-    const scraping = scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, counters), sleep: noWait, random: () => 0, captureTimeoutMs: 10 });
+    const scraping = scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, counters), sleep: noWait, random: () => 0, captureTimeoutMs: 10 });
     await vi.advanceTimersByTimeAsync(10);
     const result = await scraping;
     expect(result.sourceCount).toBe(0); expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
   });
   it('stops on no-new, without an extra scroll', async () => {
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [graphqlResponse([fixtureAd('1')], true)]]);
-    const result = await scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result.stopReason).toBe('no_new_ads'); expect(page.evaluateCount).toBe(1);
   });
   it('cuts at 1,500 source ads and does not scroll', async () => {
     const ads = Array.from({ length: 1501 }, (_, index) => fixtureAd(String(index)));
     const page = new InstrumentedPage([[graphqlResponse(ads, true)]]);
-    const result = await scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result.sourceCount).toBe(1500); expect(result.stopReason).toBe('ad_limit'); expect(page.evaluateCount).toBe(0);
   });
   it('retains partial records and stops on final rate limit', async () => {
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]);
-    const result = await scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result.status).toBe('bloqueada'); expect(result.stopReason).toBe('rate_limit'); expect(result.records).toHaveLength(1); expect(page.evaluateCount).toBe(1);
   });
   it('writes retry, scraper error and stack details through ExecutionLogger', async () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'retry-task');
-    try { const page = new InstrumentedPage([[], [], [], []], 4); await scrapeMetaAds({ query: 'retry' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); const execution = await readFile(logger.executionPath, 'utf8'); const errors = await readFile(logger.errorPath, 'utf8'); expect(execution).toContain('scraper.retry'); expect(errors).toContain('stack'); } finally { await rm(root, { recursive: true, force: true }); }
+    try { const page = new InstrumentedPage([[], [], [], []], 4); await scrapeMetaAds({ query: 'retry', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); const execution = await readFile(logger.executionPath, 'utf8'); const errors = await readFile(logger.errorPath, 'utf8'); expect(execution).toContain('scraper.retry'); expect(errors).toContain('stack'); } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('writes blocked events without creating error.jsonl for rate limits', async () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'blocked-task');
-    try { const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]); await scrapeMetaAds({ query: 'blocked' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); expect(await readFile(logger.executionPath, 'utf8')).toContain('scraper.blocked'); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
+    try { const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]); await scrapeMetaAds({ query: 'blocked', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() }); expect(await readFile(logger.executionPath, 'utf8')).toContain('scraper.blocked'); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('diagnoses unrecognized responses with complete raw evidence and a manual alternative', async () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'unrecognized-task');
     try {
       const raw = { data: { unexpected: true }, marker: 'keep-me' };
       const page = new InstrumentedPage([[raw]]);
-      const result = await scrapeMetaAds({ query: 'café colombiano' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), captureTimeoutMs: 1 });
+      const result = await scrapeMetaAds({ query: 'café colombiano', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), captureTimeoutMs: 1 });
       expect(result.extractionStatus).toBe('fallida');
       expect(result.diagnostic?.alternativeSearchUrl).toContain('q=caf%C3%A9+colombiano');
       expect(await readFile(logger.errorPath, 'utf8')).toContain('keep-me');
@@ -103,7 +117,7 @@ describe('Meta Ad scraper', () => {
   });
   it('marks a later unrecognized response as partial while preserving captured records', async () => {
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('kept')], true)], [{ data: { unexpected: true } }]]);
-    const result = await scrapeMetaAds({ query: 'partial' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    const result = await scrapeMetaAds({ query: 'partial', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
     expect(result.records).toHaveLength(1);
     expect(result).toMatchObject({ status: 'incompleta', stopReason: 'unrecognized_response', extractionStatus: 'parcial' });
   });
@@ -111,7 +125,7 @@ describe('Meta Ad scraper', () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'empty-task');
     try {
       const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
-      const result = await scrapeMetaAds({ query: 'empty' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), captureTimeoutMs: 1 });
+      const result = await scrapeMetaAds({ query: 'empty', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), captureTimeoutMs: 1 });
       expect(result).toMatchObject({ status: 'completa', extractionStatus: 'completada', sourceCount: 0 });
       await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally { await rm(root, { recursive: true, force: true }); }
@@ -120,14 +134,14 @@ describe('Meta Ad scraper', () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'production-task');
     try {
       const page = new InstrumentedPage([[{ data: { unexpected: true }, secret: 'not-logged' }]]);
-      const result = await scrapeMetaAds({ query: 'production' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), diagnosticsEnabled: false, captureTimeoutMs: 1 });
+      const result = await scrapeMetaAds({ query: 'production', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), diagnosticsEnabled: false, captureTimeoutMs: 1 });
       expect(result.diagnostic).toBeUndefined();
       await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('uses all three backoffs and no fourth attempt', async () => {
     const page = new InstrumentedPage([[], [], [], []], 4); const waits: number[] = [];
-    const result = await scrapeMetaAds({ query: 'x' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: async (ms) => { waits.push(ms); }, random: () => 0 });
+    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: async (ms) => { waits.push(ms); }, random: () => 0 });
     expect(result.status).toBe('incompleta'); expect(result.stopReason).toBe('retries_exhausted'); expect(page.gotoUrls).toHaveLength(4);
     expect(waits.filter((ms) => [60000, 120000, 240000].includes(ms))).toEqual([60000, 120000, 240000]);
   });

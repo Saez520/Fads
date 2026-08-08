@@ -31,7 +31,7 @@ describe('scrape runner and persisted output', () => {
   it('publishes snapshots, summary and records compatible with the U1 codec', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'meta-ad-agent-')); const outputPath = join(directory, 'result.json');
     try {
-      const envelope = await runScrape({ query: 'diabetes' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), undefined as never), outputPath });
+      const envelope = await runScrape({ query: 'diabetes', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), undefined as never), outputPath });
       const published = decodeScrapeEnvelope(await readFile(outputPath, 'utf8'));
       expect(envelope.summary).toMatchObject({ query: 'diabetes', count: 1, status: 'completa', stopReason: 'end_of_results' });
       expect(published.records).toHaveLength(1); expect(decodeNormalizedAd(JSON.stringify(published.records[0])).exactFingerprint).toBeTruthy();
@@ -39,31 +39,31 @@ describe('scrape runner and persisted output', () => {
   });
   it('logs final persistence after the successful writer call', async () => {
     const root = await mkdtemp(join(tmpdir(), 'runner-log-')); const logger = new ExecutionLogger(root, 'success-task');
-    try { const writer = new MemoryWriter(); await runScrape({ query: 'logged' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), writer), logger: logger.scraperLogger() }); expect((await readFile(logger.executionPath, 'utf8')).match(/scraper\.persist/g)).toHaveLength(2); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
+    try { const writer = new MemoryWriter(); await runScrape({ query: 'logged', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([[graphqlResponse([fixtureAd('1')], false)]]), writer), logger: logger.scraperLogger() }); expect((await readFile(logger.executionPath, 'utf8')).match(/scraper\.persist/g)).toHaveLength(2); await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' }); } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('writes a blocked partial and does not reuse records across runs', async () => {
     const writer = new MemoryWriter();
-    const blocked = await runScrape({ query: 'x' }, options(new RunnerPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]), writer));
-    const isolated = await runScrape({ query: 'x' }, options(new RunnerPage([[graphqlResponse([fixtureAd('2')], false)]]), writer));
+    const blocked = await runScrape({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, options(new RunnerPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]), writer));
+    const isolated = await runScrape({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, options(new RunnerPage([[graphqlResponse([fixtureAd('2')], false)]]), writer));
     expect(blocked.incomplete).toBe(true); expect(blocked.summary.status).toBe('bloqueada'); expect(blocked.records[0]?.provenance.sourceAdId).toBe('1');
     expect(isolated.incomplete).toBe(false); expect(isolated.records).toHaveLength(1); expect(isolated.records[0]?.provenance.sourceAdId).toBe('2');
     expect(writer.envelopes.some((entry) => entry.incomplete && entry.summary.count === 1)).toBe(true);
   });
   it('rejects filters before browser creation', () => expect(() => validateScrapeRequest({ query: 'x', filters: {} })).toThrow());
   it('classifies a capture without an interpretable response as inconclusive', async () => {
-    const result = await runScrape({ query: 'empty' }, { ...options(new RunnerPage([[]]), undefined as never), captureTimeoutMs: 1 });
+    const result = await runScrape({ query: 'empty', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([[]]), undefined as never), captureTimeoutMs: 1 });
     expect(result).toMatchObject({ incomplete: true, extractionStatus: 'fallida', summary: { count: 0, status: 'incompleta', extractionStatus: 'fallida', stopReason: 'unrecognized_response' } });
     expect(result.diagnostic?.alternativeSearchUrl).toContain('q=empty');
   });
   it('classifies failure before records and sanitizes the persisted snapshot', async () => {
     const writer = new MemoryWriter();
-    const result = await runScrape({ query: 'failed' }, options(new RunnerPage([], true), writer));
+     const result = await runScrape({ query: 'failed', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, options(new RunnerPage([], true), writer));
     expect(result).toMatchObject({ extractionStatus: 'fallida', summary: { count: 0, extractionStatus: 'fallida' } });
     expect(result.diagnostic?.userMessage).toContain('no se recuperaron');
     expect(JSON.stringify(writer.envelopes)).not.toContain('secret-token');
     expect(JSON.stringify(writer.envelopes)).not.toContain('/Users/local');
     const errorRoot = await mkdtemp(join(tmpdir(), 'runner-error-log-')); const logger = new ExecutionLogger(errorRoot, 'failed-task');
-    try { await runScrape({ query: 'failed-log' }, { ...options(new RunnerPage([], true), writer), logger: logger.scraperLogger() }); } catch { /* expected extraction failure */ }
+     try { await runScrape({ query: 'failed-log', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([], true), writer), logger: logger.scraperLogger() }); } catch { /* expected extraction failure */ }
     expect(await readFile(logger.errorPath, 'utf8')).toContain('stack'); await rm(errorRoot, { recursive: true, force: true });
   });
 });
