@@ -23,7 +23,14 @@ function isExtractionStatus(value: unknown): value is ExtractionStatus { return 
 function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const diagnostic = value as Record<string, unknown>;
-  return typeof diagnostic.userMessage === 'string' && typeof diagnostic.technicalDetail === 'string' && (diagnostic.alternativeSearchUrl === undefined || typeof diagnostic.alternativeSearchUrl === 'string');
+  return typeof diagnostic.userMessage === 'string' && typeof diagnostic.technicalDetail === 'string'
+    && (diagnostic.alternativeSearchUrl === undefined || typeof diagnostic.alternativeSearchUrl === 'string')
+    && (diagnostic.evidenceId === undefined || typeof diagnostic.evidenceId === 'string')
+    && (diagnostic.logReference === undefined || typeof diagnostic.logReference === 'string')
+    && (diagnostic.responsePresent === undefined || typeof diagnostic.responsePresent === 'boolean')
+    && (diagnostic.status === undefined || (typeof diagnostic.status === 'number' && Number.isFinite(diagnostic.status)))
+    && (diagnostic.contentType === undefined || typeof diagnostic.contentType === 'string')
+    && (diagnostic.url === undefined || typeof diagnostic.url === 'string');
 }
 
 export function createScrapeEnvelope(query: string, records: NormalizedAdRecord[], summary: ScrapeSummary): ScrapeEnvelope {

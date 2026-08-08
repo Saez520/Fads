@@ -55,6 +55,16 @@ describe('scrape runner and persisted output', () => {
     expect(result).toMatchObject({ incomplete: true, extractionStatus: 'fallida', summary: { count: 0, status: 'incompleta', extractionStatus: 'fallida', stopReason: 'unrecognized_response' } });
     expect(result.diagnostic?.alternativeSearchUrl).toContain('q=empty');
   });
+  it('keeps evidence summaries in the persisted envelope without a body', async () => {
+    const result = await runScrape({ query: 'empty', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([[]]), undefined as never), captureTimeoutMs: 1 });
+    const serialized = JSON.stringify(result);
+    expect(result.diagnostic).toMatchObject({ responsePresent: false, evidenceId: expect.any(String), logReference: expect.stringContaining('scraper.network_evidence:') });
+    expect(serialized).not.toContain('body');
+  });
+  it('decodes legacy envelopes without evidence fields', () => {
+    const legacy = JSON.stringify({ query: 'legacy', records: [], summary: { query: 'legacy', count: 0, status: 'completa', stopReason: 'end_of_results', durationMs: 1 }, incomplete: false });
+    expect(decodeScrapeEnvelope(legacy)).toMatchObject({ query: 'legacy', incomplete: false });
+  });
   it('classifies failure before records and sanitizes the persisted snapshot', async () => {
     const writer = new MemoryWriter();
      const result = await runScrape({ query: 'failed', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, options(new RunnerPage([], true), writer));

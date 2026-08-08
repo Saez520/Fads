@@ -4,7 +4,7 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 export type ScrapeStatus = 'completa' | 'incompleta' | 'bloqueada';
 export type ExtractionStatus = 'completada' | 'fallida' | 'parcial';
 export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'unrecognized_response' | 'error';
-export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string }
+export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string; evidenceId?: string; logReference?: string; responsePresent?: boolean; status?: number; contentType?: string; url?: string }
 
 export interface ScrapeRequest { query: string; country: string; dateFrom: string; dateTo: string; adType: 'all' }
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
@@ -44,12 +44,13 @@ export function sanitizeExtractionError(error: unknown, hasRecords: boolean): Ex
   return { userMessage, technicalDetail };
 }
 
-export interface BrowserPageResponse { url(): string; json(): Promise<unknown> }
+export interface BrowserPageResponse { url(): string; json(): Promise<unknown>; status?(): number; headers?(): Record<string, string>; text?(): Promise<string>; allHeaders?(): Promise<Record<string, string>> }
 export interface BrowserPage {
   on(event: 'response', listener: (response: BrowserPageResponse) => void | Promise<void>): void;
   goto(url: string): Promise<unknown>;
   evaluate(script: () => void): Promise<unknown>;
   close(): Promise<void>;
+  url?(): string;
 }
 export interface BrowserContext { newPage(): Promise<BrowserPage>; close(): Promise<void> }
 export interface Browser { newContext(options?: Record<string, unknown>): Promise<BrowserContext>; close(): Promise<void> }
@@ -65,6 +66,7 @@ export interface MetaAdScraperOptions {
   onBatch?: (records: NormalizedAdRecord[]) => Promise<void> | void;
   maxSourceAds?: number;
   diagnosticsEnabled?: boolean;
+  networkEvidenceBodyLimitBytes?: number;
 }
 
 export interface ParsedBatch { ads: AdInput[]; hasNextPage: boolean; endCursor: string | null; sourceIds: string[] }

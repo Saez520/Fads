@@ -26,4 +26,14 @@ describe('ExecutionLogger', () => {
     const line = JSON.parse((await readFile(logger.errorPath, 'utf8')).trim());
     expect(line.context).toMatchObject({ rawResponse: { marker: 'raw-value', count: '1' } });
   });
+  it('duplicates sanitized network evidence errors in both JSONL files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'execution-logger-')); roots.push(root);
+    const logger = new ExecutionLogger(root, 'evidence-task');
+    logger.scraperLogger()({ type: 'error', query: 'coffee', message: 'scraper.network_evidence', evidence: { evidenceId: 'e-1', responsePresent: true, body: 'sanitized' } });
+    const execution = await readFile(logger.executionPath, 'utf8');
+    const errors = await readFile(logger.errorPath, 'utf8');
+    expect(execution).toContain('scraper.network_evidence');
+    expect(errors).toContain('e-1');
+    expect(errors).toContain('sanitized');
+  });
 });

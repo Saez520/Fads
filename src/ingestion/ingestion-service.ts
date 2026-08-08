@@ -108,7 +108,13 @@ function isExtractionStatus(value: unknown): value is ExtractionStatus { return 
 function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const diagnostic = value as Record<string, unknown>;
-    return typeof diagnostic.userMessage === 'string' && diagnostic.userMessage.length <= 240 && typeof diagnostic.technicalDetail === 'string' && diagnostic.technicalDetail.length <= 1000 && (diagnostic.alternativeSearchUrl === undefined || typeof diagnostic.alternativeSearchUrl === 'string');
+    return typeof diagnostic.userMessage === 'string' && diagnostic.userMessage.length <= 240 && typeof diagnostic.technicalDetail === 'string' && diagnostic.technicalDetail.length <= 1000 && (diagnostic.alternativeSearchUrl === undefined || typeof diagnostic.alternativeSearchUrl === 'string')
+      && (diagnostic.evidenceId === undefined || typeof diagnostic.evidenceId === 'string')
+      && (diagnostic.logReference === undefined || typeof diagnostic.logReference === 'string')
+      && (diagnostic.responsePresent === undefined || typeof diagnostic.responsePresent === 'boolean')
+      && (diagnostic.status === undefined || (typeof diagnostic.status === 'number' && Number.isFinite(diagnostic.status)))
+      && (diagnostic.contentType === undefined || typeof diagnostic.contentType === 'string')
+      && (diagnostic.url === undefined || typeof diagnostic.url === 'string');
 }
 function sanitizeDiagnostic(diagnostic: ExtractionDiagnostic, hasRecords: boolean): ExtractionDiagnostic {
   const fallback = sanitizeExtractionError(diagnostic.technicalDetail, hasRecords);
@@ -116,5 +122,15 @@ function sanitizeDiagnostic(diagnostic: ExtractionDiagnostic, hasRecords: boolea
   const userMessage = diagnostic.alternativeSearchUrl && !safeUserMessage.includes('búsqueda manual')
     ? `${safeUserMessage} Puede continuar con la búsqueda manual.`
     : safeUserMessage;
-  return { userMessage, technicalDetail: fallback.technicalDetail, ...(diagnostic.alternativeSearchUrl ? { alternativeSearchUrl: diagnostic.alternativeSearchUrl } : {}) };
+  return {
+    userMessage,
+    technicalDetail: fallback.technicalDetail,
+    ...(diagnostic.alternativeSearchUrl ? { alternativeSearchUrl: diagnostic.alternativeSearchUrl } : {}),
+    ...(diagnostic.evidenceId ? { evidenceId: diagnostic.evidenceId } : {}),
+    ...(diagnostic.logReference ? { logReference: diagnostic.logReference } : {}),
+    ...(diagnostic.responsePresent !== undefined ? { responsePresent: diagnostic.responsePresent } : {}),
+    ...(diagnostic.status !== undefined ? { status: diagnostic.status } : {}),
+    ...(diagnostic.contentType ? { contentType: diagnostic.contentType } : {}),
+    ...(diagnostic.url ? { url: diagnostic.url } : {}),
+  };
 }

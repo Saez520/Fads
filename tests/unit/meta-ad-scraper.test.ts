@@ -6,6 +6,7 @@ import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graph
 import { scrapeMetaAds } from '../../src/scraper/meta-ad-scraper.js';
 import { ExecutionLogger } from '../../src/mcp/execution-logger.js';
 import { sanitizeExtractionError, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageResponse } from '../../src/scraper/scraper-types.js';
+import { buildNetworkEvidence, networkEvidenceSummary } from '../../src/scraper/network-evidence.js';
 
 class InstrumentedPage implements BrowserPage {
   private listener?: (response: BrowserPageResponse) => void | Promise<void>;
@@ -21,7 +22,15 @@ class InstrumentedPage implements BrowserPage {
   }
   async evaluate(): Promise<void> { this.evaluateCount++; this.emit(this.responses.shift() ?? []); }
   async close(): Promise<void> { this.closeCount++; }
-  emit(payloads: unknown[]): void { for (const payload of payloads) this.listener?.({ url: () => 'https://www.facebook.com/api/graphql/?q=x', json: async () => payload }); }
+  emit(payloads: unknown[]): void {
+    for (const payload of payloads) this.listener?.({
+      url: () => 'https://www.facebook.com/api/graphql/?q=x',
+      json: async () => payload,
+      text: async () => JSON.stringify(payload),
+      status: () => 200,
+      headers: () => ({ 'content-type': 'application/json' }),
+    });
+  }
   emitNext(): void { this.emit(this.responses.shift() ?? []); }
 }
 function fakeLauncher(page: InstrumentedPage, counters: { contextClose: number; browserClose: number }): BrowserLauncher {
@@ -38,6 +47,44 @@ describe('extraction diagnostic sanitization', () => {
     expect(diagnostic.userMessage).toContain('no se recuperaron');
     expect(diagnostic.technicalDetail).not.toContain('eyJhbGci');
     expect(diagnostic.technicalDetail).not.toContain('/Users/test');
+  });
+});
+
+describe('network evidence', () => {
+  it('redacts sensitive values and truncates by UTF-8 bytes after redaction', () => {
+    const evidence = buildNetworkEvidence({
+      responsePresent: true,
+      url: 'https://example.test/graphql?token=secret-token&query=cafe',
+      body: `cookie: session-secret authorization: Bearer bearer-secret token=token-secret ${'界'.repeat(20000)}`,
+      bodyLimitBytes: 32768,
+    });
+    expect(evidence.url).not.toContain('secret-token');
+    expect(evidence.body).not.toContain('session-secret');
+    expect(evidence.body).not.toContain('bearer-secret');
+    expect(evidence.body).not.toContain('token-secret');
+    expect(Buffer.byteLength(evidence.body ?? '', 'utf8')).toBeLessThanOrEqual(32768);
+    expect(evidence.bodyTruncated).toBe(true);
+    expect(networkEvidenceSummary(evidence)).not.toHaveProperty('body');
+  });
+  it('redacts session and cookie value variants without matching legitimate fields', () => {
+    const evidence = buildNetworkEvidence({
+      responsePresent: true,
+      body: JSON.stringify({
+        session_id: 'leaked-session-value',
+        cookieValue: 'leaked-cookie-value',
+        session_title: 'keep-session-title',
+        tokenCount: 3,
+      }),
+    });
+    expect(evidence.body).not.toContain('leaked-session-value');
+    expect(evidence.body).not.toContain('leaked-cookie-value');
+    expect(evidence.body).toContain('keep-session-title');
+    expect(evidence.body).toContain('tokenCount');
+  });
+  it('represents a missing response without a body', () => {
+    const evidence = buildNetworkEvidence({ responsePresent: false, url: 'https://example.test/ads' });
+    expect(evidence.responsePresent).toBe(false);
+    expect(evidence).not.toHaveProperty('body');
   });
 });
 
@@ -113,6 +160,8 @@ describe('Meta Ad scraper', () => {
       expect(result.extractionStatus).toBe('fallida');
       expect(result.diagnostic?.alternativeSearchUrl).toContain('q=caf%C3%A9+colombiano');
       expect(await readFile(logger.errorPath, 'utf8')).toContain('keep-me');
+      expect(result.diagnostic).toMatchObject({ responsePresent: true, status: 200, contentType: 'application/json', evidenceId: expect.any(String), logReference: expect.stringContaining('scraper.network_evidence:') });
+      expect(result.diagnostic).not.toHaveProperty('body');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('marks a later unrecognized response as partial while preserving captured records', async () => {
@@ -130,13 +179,13 @@ describe('Meta Ad scraper', () => {
       await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' });
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  it('disables raw diagnostics and alternatives when explicitly disabled', async () => {
+  it('always records sanitized evidence even when optional diagnostics are disabled', async () => {
     const root = await mkdtemp(join(tmpdir(), 'scraper-log-')); const logger = new ExecutionLogger(root, 'production-task');
     try {
       const page = new InstrumentedPage([[{ data: { unexpected: true }, secret: 'not-logged' }]]);
       const result = await scrapeMetaAds({ query: 'production', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger(), diagnosticsEnabled: false, captureTimeoutMs: 1 });
-      expect(result.diagnostic).toBeUndefined();
-      await expect(stat(logger.errorPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(result.diagnostic).toMatchObject({ responsePresent: true, evidenceId: expect.any(String) });
+      expect(await readFile(logger.errorPath, 'utf8')).not.toContain('not-logged');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('uses all three backoffs and no fourth attempt', async () => {
