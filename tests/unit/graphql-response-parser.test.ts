@@ -27,4 +27,8 @@ describe('GraphQL response parser', () => {
   it('does not turn incomplete SSR into an empty batch', () => {
     expect(parseSsrSearchResultsConnection('<script>{"search_results_connection":{"edges":[]}}</script>')).toMatchObject({ classification: 'incomplete' });
   });
+  it('rejects SSR connections containing an ad without an archive id', () => {
+    const html = '<script>{"search_results_connection":{"edges":[{"node":{"collated_results":[{"page_name":"invalid"}]}}],"page_info":{"has_next_page":false}}}</script>';
+    expect(parseSsrSearchResultsConnection(html)).toMatchObject({ classification: 'incomplete' });
+  });
 });

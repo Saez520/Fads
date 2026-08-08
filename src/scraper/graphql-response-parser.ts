@@ -15,7 +15,8 @@ function batchFromConnection(connection: Record<string, unknown>, requirePageInf
     const collated = node && Array.isArray(node.collated_results) ? node.collated_results : [];
     for (const item of collated) {
       const ad = record(item);
-      if (typeof ad?.ad_archive_id !== 'string' || ids.has(ad.ad_archive_id)) continue;
+      if (typeof ad?.ad_archive_id !== 'string') return { classification: 'incomplete' };
+      if (ids.has(ad.ad_archive_id)) continue;
       ids.add(ad.ad_archive_id);
       ads.push(ad as unknown as AdInput);
     }

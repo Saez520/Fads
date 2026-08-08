@@ -254,6 +254,44 @@ describe('Meta Ad scraper', () => {
     expect(page.gotoUrls).toHaveLength(2);
     expect(waits).toContain(1500);
   });
+  it('stops after one reload when the document challenge persists', async () => {
+    const page = new InstrumentedPage([
+      [documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)],
+      [documentResponse('https://example.test/rd_challenge', '<html>blocked</html>', 403)],
+    ]);
+    const result = await scrapeMetaAds({ query: 'persistent-block', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    expect(result).toMatchObject({ status: 'bloqueada', stopReason: 'unrecognized_response' });
+    expect(page.gotoUrls).toHaveLength(2);
+    expect(result.diagnostic?.classifications).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'possible_http_block' })]));
+  });
+  it('captures a valid SSR document as the initial batch', async () => {
+    const body = '<script>{"bootstrap":{"search_results_connection":{"edges":[{"node":{"collated_results":[{"ad_archive_id":"ssr-scraper"}]}}],"page_info":{"has_next_page":false}}}}</script>';
+    const page = new InstrumentedPage([[documentResponse('https://example.test/ads', body)]]);
+    const result = await scrapeMetaAds({ query: 'ssr', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(result).toMatchObject({ status: 'completa', stopReason: 'end_of_results', sourceCount: 1 });
+    expect(page.evaluateCount).toBe(0);
+  });
+  it('terminates explicitly for CAPTCHA or login documents', async () => {
+    const page = new InstrumentedPage([[documentResponse('https://example.test/login', '<html>captcha required</html>')]]);
+    const result = await scrapeMetaAds({ query: 'captcha', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    expect(result.status).toBe('bloqueada');
+    expect(result.diagnostic?.classifications).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'possible_login' })]));
+  });
+  it('terminates explicitly for a non-blocking HTTP error document', async () => {
+    const page = new InstrumentedPage([[documentResponse('https://example.test/not-found', '<html>not found</html>', 404)]]);
+    const result = await scrapeMetaAds({ query: 'http-error', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    expect(result).toMatchObject({ status: 'incompleta', stopReason: 'error' });
+  });
+  it('does not complete on unrecognized traffic before the semantic timeout', async () => {
+    vi.useFakeTimers();
+    const page = new InstrumentedPage([[{ data: { incidental: true } }]]);
+    const scraping = scrapeMetaAds({ query: 'semantic-timeout', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 50 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(page.closeCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(40);
+    const result = await scraping;
+    expect(result).toMatchObject({ status: 'incompleta', stopReason: 'unrecognized_response' });
+  });
   it('emits browser, search, batch and finish events', async () => {
     const events: string[] = []; const page = new InstrumentedPage([[graphqlResponse([fixtureAd('logged')], false)]]);
     await scrapeMetaAds({ query: 'logged', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event.type) });
