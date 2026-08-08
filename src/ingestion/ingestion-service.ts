@@ -64,7 +64,7 @@ export class IngestionService {
 
       let searchId: string;
       do { searchId = this.generateSearchId(); } while (await this.store.exists(searchId));
-      const status = this.statusFor(envelope.summary.extractionStatus, envelope.summary.status, envelope.incomplete, warnings.length > 0, records.length);
+      const status = this.statusFor(envelope.summary.extractionStatus, envelope.summary.status, envelope.summary.stopReason, envelope.incomplete, warnings.length > 0, records.length);
       const index: IngestionIndex = {
         searchId, query: envelope.query, createdAt: new Date(this.clock.now()).toISOString(),
         totalRecords: records.length, status, source: this.source, durationMs: envelope.summary.durationMs,
@@ -95,7 +95,8 @@ export class IngestionService {
     return { query: input.query, records: input.records as NormalizedAdRecord[], summary: { ...item, ...(extractionStatus !== undefined ? { extractionStatus } : {}), ...(sanitizedDiagnostic ? { diagnostic: sanitizedDiagnostic } : {}) } as unknown as ScrapeEnvelope['summary'], incomplete: input.incomplete, ...(extractionStatus ? { extractionStatus } : {}), ...(sanitizedDiagnostic ? { diagnostic: sanitizedDiagnostic } : {}) };
   }
 
-  private statusFor(extractionStatus: ScrapeEnvelope['summary']['extractionStatus'], status: ScrapeStatus, incomplete: boolean, discarded: boolean, recordCount: number): IngestionStatus {
+  private statusFor(extractionStatus: ScrapeEnvelope['summary']['extractionStatus'], status: ScrapeStatus, stopReason: StopReason, incomplete: boolean, discarded: boolean, recordCount: number): IngestionStatus {
+    if (stopReason === 'empty_capture') return 'partial';
     if (extractionStatus === 'fallida' || (status !== 'completa' && recordCount === 0)) return 'failed';
     return extractionStatus === 'parcial' || incomplete || discarded ? 'partial' : 'completed';
   }
@@ -103,7 +104,7 @@ export class IngestionService {
   private error(error: unknown): IngestionError { return { message: sanitizeExtractionError(error, false).technicalDetail }; }
 }
 function isScrapeStatus(value: unknown): value is ScrapeStatus { return value === 'completa' || value === 'incompleta' || value === 'bloqueada'; }
-function isStopReason(value: unknown): value is StopReason { return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'unrecognized_response' || value === 'error'; }
+function isStopReason(value: unknown): value is StopReason { return value === 'ad_limit' || value === 'end_of_results' || value === 'no_new_ads' || value === 'rate_limit' || value === 'retries_exhausted' || value === 'unrecognized_response' || value === 'empty_capture' || value === 'error'; }
 function isExtractionStatus(value: unknown): value is ExtractionStatus { return value === 'completada' || value === 'fallida' || value === 'parcial'; }
 function isDiagnostic(value: unknown): value is ExtractionDiagnostic {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;

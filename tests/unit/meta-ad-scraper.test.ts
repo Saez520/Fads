@@ -177,11 +177,24 @@ describe('Meta Ad scraper', () => {
     expect(result.diagnostic?.networkEvidence?.some((item) => item.kind === 'network_failure')).toBe(true);
     expect(JSON.stringify(result)).not.toContain('secret');
   });
+  it('publishes one consolidated evidence event for empty_capture', async () => {
+    const events: unknown[] = [];
+    const page = new InstrumentedPage([[documentResponse('https://example.test/blocked', '<html>blocked</html>', 403)]]);
+    const result = await scrapeMetaAds({ query: 'consolidated', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1, logger: (event) => events.push(event) });
+    const evidenceEvents = events.filter((event) => typeof event === 'object' && event !== null && 'message' in event && (event as { message?: unknown }).message === 'scraper.network_evidence') as Array<{ reason?: string; evidence?: unknown }>;
+    expect(result.stopReason).toBe('empty_capture');
+    expect(evidenceEvents).toHaveLength(1);
+    expect(evidenceEvents[0]).toMatchObject({ reason: 'empty_capture', evidence: expect.any(Array) });
+    expect(evidenceEvents[0].evidence).toHaveLength(1);
+  });
   it('preserves empty_capture when diagnostic logging fails', async () => {
     const page = new InstrumentedPage([[documentResponse('https://example.test/blocked', '<html>blocked</html>', 403)]]);
     const result = await scrapeMetaAds({ query: 'failure', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1, logger: (event) => { if (event.type === 'error') throw new Error('logger unavailable'); } });
     expect(result.stopReason).toBe('empty_capture');
     expect(result.diagnostic?.diagnosticIncomplete).toBe(true);
+    expect(result.diagnostic).not.toHaveProperty('logReference');
+    expect(result.diagnostic).not.toHaveProperty('evidenceId');
+    expect(result.diagnostic).not.toHaveProperty('networkEvidence');
   });
   it('builds the filtered URL from structured fields without polluting the query', async () => {
     const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);

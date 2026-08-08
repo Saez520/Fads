@@ -95,6 +95,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         await collect(buildNetworkEvidence({ responsePresent: true, status, contentType, url: response.url(), body, hops, kind: 'document', bodyLimitBytes: networkEvidenceBodyLimitBytes }));
       } catch { diagnosticIncomplete = true; }
     };
+    const publishNetworkEvidence = (reason: string, evidence: NetworkEvidence | NetworkEvidence[]): boolean => {
+      try {
+        logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason, evidence });
+        return true;
+      } catch {
+        diagnosticIncomplete = true;
+        return false;
+      }
+    };
     page.on('response', (response) => {
       if (!isGraphQlUrl(response.url()) && !isGraphQlEndpoint(response.url())) {
         const task = collectResponse(response); pending.push(task); return;
@@ -105,8 +114,8 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         try { body = response.text ? await response.text() : undefined; } catch { body = undefined; }
         const headers = response.headers ? response.headers() : {};
         const contentType = headers['content-type'] ?? headers['Content-Type'];
-        latestEvidence = buildNetworkEvidence({ responsePresent: true, status: response.status?.(), contentType, url: response.url(), body, bodyLimitBytes: networkEvidenceBodyLimitBytes });
-        try { logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason, evidence: latestEvidence }); } catch { diagnosticIncomplete = true; }
+        const evidence = buildNetworkEvidence({ responsePresent: true, status: response.status?.(), contentType, url: response.url(), body, bodyLimitBytes: networkEvidenceBodyLimitBytes });
+        if (publishNetworkEvidence(reason, evidence)) latestEvidence = evidence;
       };
       const task = response.json().then(async (payload) => {
         const parsed = parseGraphQlResponse(payload);
@@ -177,14 +186,18 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
     if (!finalRateLimit && (recognizedResponses === 0 || discardedResponses > 0)) {
       status = 'incompleta';
-      stopReason = recognizedResponses === 0 ? 'empty_capture' : 'unrecognized_response';
-      if (discardedResponses === 0) {
-        const evidence = buildNetworkEvidence({ responsePresent: false, url: page?.url?.(), bodyLimitBytes: networkEvidenceBodyLimitBytes });
-        latestEvidence = evidence;
-        try { logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason: 'empty_capture', evidence }); } catch { diagnosticIncomplete = true; }
-      }
-      if (stopReason === 'empty_capture' && networkEvidence.length > 0) {
-        try { logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason: 'empty_capture', evidence: networkEvidence }); } catch { diagnosticIncomplete = true; }
+      stopReason = recognizedResponses === 0 && discardedResponses === 0 ? 'empty_capture' : 'unrecognized_response';
+      if (stopReason === 'empty_capture') {
+        const evidence = networkEvidence.length > 0
+          ? networkEvidence
+          : buildNetworkEvidence({ responsePresent: false, url: page?.url?.(), bodyLimitBytes: networkEvidenceBodyLimitBytes });
+        if (publishNetworkEvidence('empty_capture', evidence)) {
+          if (Array.isArray(evidence)) latestEvidence = evidence[evidence.length - 1];
+          else latestEvidence = evidence;
+        } else {
+          latestEvidence = undefined;
+          networkEvidence.length = 0;
+        }
       }
     }
   } catch (error) {

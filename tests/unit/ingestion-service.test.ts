@@ -94,6 +94,16 @@ describe('IngestionService', () => {
     const result = await service.ingestFile(inputPath);
     expect(result).toMatchObject({ success: true, index: { status: 'failed', extractionStatus: 'fallida', diagnostic: { alternativeSearchUrl: expect.stringContaining('q=unrecognized') } } });
   });
+  it('persists empty_capture as partial with a search id and sanitized diagnostic', async () => {
+    const input = envelope('empty-capture', [], true, 'empty_capture') as Record<string, unknown>;
+    input.extractionStatus = 'fallida';
+    input.diagnostic = { userMessage: 'Captura inconclusa.', technicalDetail: 'Authorization: Bearer secret-token /Users/local/app.ts' };
+    const { inputPath, service } = await setup(input);
+    const result = await service.ingestFile(inputPath);
+    expect(result).toMatchObject({ success: true, created: true, searchId: 'fixed-id', index: { status: 'partial', extractionStatus: 'fallida', totalRecords: 0, diagnostic: { userMessage: expect.any(String) } } });
+    expect(JSON.stringify(result.index)).not.toContain('secret-token');
+    expect(JSON.stringify(result.index)).not.toContain('/Users/local');
+  });
   it('rejects an invalid extraction status instead of persisting it', async () => {
     const input = envelope('invalid-status', [], true) as Record<string, unknown>;
     input.extractionStatus = 'unknown';
