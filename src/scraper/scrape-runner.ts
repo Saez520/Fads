@@ -9,6 +9,7 @@ export interface ScrapeRunnerOptions extends MetaAdScraperOptions { outputPath?:
 export async function runScrape(input: unknown, options: ScrapeRunnerOptions = {}): Promise<ScrapeEnvelope> {
   const request: ScrapeRequest = validateScrapeRequest(input);
   const writer = options.writer ?? (options.outputPath ? new AtomicJsonResultWriter(options.outputPath) : undefined);
+  const diagnosticState = options.diagnosticState ?? options.logger?.diagnosticState;
   const clock: Clock = options.clock ?? { now: () => performance.now() };
   const started = clock.now();
   let latestRecords: NormalizedAdRecord[] = [];
@@ -19,12 +20,15 @@ export async function runScrape(input: unknown, options: ScrapeRunnerOptions = {
     options.logger?.({ type: 'persist', query: request.query, count: latestRecords.length });
   };
   try {
-    const result = await scrapeMetaAds(request, { ...options, onBatch: async (records) => { latestRecords = records; await persist('incompleta', 'error'); await options.onBatch?.(records); } });
+    const result = await scrapeMetaAds(request, { ...options, diagnosticState, onBatch: async (records) => { latestRecords = records; await persist('incompleta', 'error'); await options.onBatch?.(records); } });
     latestRecords = result.records;
-    const summary: ScrapeSummary = { query: request.query, count: result.records.length, status: result.status, stopReason: result.stopReason, durationMs: clock.now() - started, extractionStatus: result.extractionStatus, ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}) };
-    const envelope = createScrapeEnvelope(request.query, result.records, summary);
-     if (writer) { await writer.write(envelope); options.logger?.({ type: 'persist', query: request.query, count: result.records.length }); }
-    return envelope;
+      const diagnosticSummary = diagnosticState?.diagnosticSummaryEvent;
+      const diagnostic = result.diagnostic;
+     const summary: ScrapeSummary = { query: request.query, count: result.records.length, status: result.status, stopReason: result.stopReason, durationMs: clock.now() - started, extractionStatus: result.extractionStatus, ...(diagnostic ? { diagnostic } : {}) };
+     const envelope = createScrapeEnvelope(request.query, result.records, summary);
+      if (writer) { await writer.write(envelope); options.logger?.({ type: 'persist', query: request.query, count: result.records.length }); }
+     options.logger?.({ type: 'finish', query: request.query, count: result.records.length, durationMs: summary.durationMs, status: result.status, stopReason: result.stopReason, diagnosticPath: diagnosticState?.diagnosticReference, primaryClassification: diagnosticSummary?.primary, signals: diagnosticSummary?.signals, droppedEvents: diagnosticState?.droppedDiagnosticEvents ?? 0, diagnosticIncomplete: diagnosticState?.diagnosticIncomplete ?? false });
+     return envelope;
   } catch (error) {
     await persist('incompleta', 'error', sanitizeExtractionError(error, latestRecords.length > 0));
     throw error;

@@ -25,4 +25,13 @@ describe('McpStore', () => {
     const lines = (await readFile(join(root, 'tasks', 't2', 'logs', 'execution.jsonl'), 'utf8')).trim().split('\n');
     expect(lines).toHaveLength(1); expect(JSON.parse(lines[0]).message).toBe('kept');
   });
+  it('creates the diagnostic log beside the task and never changes the task contract', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mcp-store-')); roots.push(root);
+    const store = new McpStore({ taskRoot: join(root, 'tasks') });
+    await store.saveTask(task('diagnostic-task'));
+    const logger = store.getExecutionLogger('diagnostic-task');
+    logger.diagnosticSummary({ family: 'summary', type: 'diagnostic.summary', primary: 'unknown', secondary: [], signals: { challenge: false, captcha: false, login: false, ssrResults: false, explicitEmpty: false, shellWithoutResults: true, resultCount: 0, connectionCount: 0 }, durationMs: 1, eventCount: 1, droppedEvents: 0, diagnosticIncomplete: false });
+    expect(await readFile(logger.diagnosticPath, 'utf8')).toContain('diagnostic.summary');
+    expect(await store.getTask('diagnostic-task')).not.toHaveProperty('diagnosticPath');
+  });
 });

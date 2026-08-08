@@ -37,4 +37,23 @@ describe('ExecutionLogger', () => {
     expect(errors).toContain('e-1');
     expect(errors).toContain('sanitized');
   });
+  it('buffers low-priority diagnostics, drops them before high priority data, and keeps one truncation marker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'execution-logger-')); roots.push(root);
+    const logger = new ExecutionLogger(root, 'budget-task');
+    for (let index = 0; index < 400; index++) logger.logDiagnostic({ family: 'runtime', type: 'diagnostic.runtime', kind: 'console', message: 'x'.repeat(1200), priority: 'low' }, false);
+    logger.logDiagnostic({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: 'high-priority', priority: 'high' }, true);
+    logger.diagnosticSummary({ family: 'summary', type: 'diagnostic.summary', primary: 'unknown', secondary: [], signals: { challenge: false, captcha: false, login: false, ssrResults: false, explicitEmpty: false, shellWithoutResults: true, resultCount: 0, connectionCount: 0 }, durationMs: 1, eventCount: 401, droppedEvents: logger.droppedDiagnosticEvents, diagnosticIncomplete: logger.diagnosticIncomplete });
+    const content = await readFile(logger.diagnosticPath, 'utf8');
+    expect(Buffer.byteLength(content)).toBeLessThanOrEqual(256 * 1024);
+    expect(content.match(/diagnostic\.truncated/g)?.length ?? 0).toBeLessThanOrEqual(1);
+    expect(content).toContain('high-priority');
+    expect(logger.droppedDiagnosticEvents).toBeGreaterThan(0);
+  });
+  it('removes prohibited secret keys recursively from diagnostics', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'execution-logger-')); roots.push(root);
+    const logger = new ExecutionLogger(root, 'secret-task');
+    logger.diagnosticSummary({ family: 'summary', type: 'diagnostic.summary', primary: 'unknown', secondary: [], signals: { challenge: false, captcha: false, login: false, ssrResults: false, explicitEmpty: false, shellWithoutResults: true, resultCount: 0, connectionCount: 0 }, durationMs: 1, eventCount: 1, droppedEvents: 0, diagnosticIncomplete: false, metadata: { authorization: 'secret', nested: { cookie: 'value', safe: 'ok' } } } as never);
+    const content = await readFile(logger.diagnosticPath, 'utf8');
+    expect(content).not.toContain('secret'); expect(content).not.toContain('value'); expect(content).toContain('safe');
+  });
 });

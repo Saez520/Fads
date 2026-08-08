@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { BrowserPageRequest, NetworkEvidenceClassification, NetworkEvidenceHop } from './scraper-types.js';
+import type { BrowserPageRequest, DiagnosticDomSignals, DiagnosticPrimaryClassification, NetworkEvidenceClassification, NetworkEvidenceHop } from './scraper-types.js';
 
 export interface NetworkEvidenceInput {
   responsePresent: boolean;
@@ -60,6 +60,22 @@ export function sanitizeNetworkUrl(url: string): string {
   } catch {
     return redactNetworkText(url);
   }
+}
+
+export function sanitizeDiagnosticText(value: string, limit = 500): string {
+  const scrubbed = redactNetworkText(value).replace(/<[^>]*>/g, '[html]').replace(/[\r\n]+/g, ' ').trim();
+  return scrubbed.length > limit ? `${scrubbed.slice(0, limit)}…` : scrubbed;
+}
+
+export function classifyDiagnostic(signals: DiagnosticDomSignals, networkFailure = false, httpBlock = false): DiagnosticPrimaryClassification {
+  if (networkFailure) return 'network_failure';
+  if (httpBlock || signals.challenge) return 'challenge_or_http_block';
+  if (signals.captcha) return 'captcha';
+  if (signals.ssrResults) return 'ssr_results';
+  if (signals.explicitEmpty) return 'explicit_empty';
+  if (signals.login) return 'login_required';
+  if (signals.shellWithoutResults) return 'shell_without_results';
+  return 'unknown';
 }
 
 function truncateUtf8(value: string, limit: number): { value: string; truncated: boolean } {

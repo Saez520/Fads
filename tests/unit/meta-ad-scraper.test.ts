@@ -6,7 +6,7 @@ import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graph
 import { scrapeMetaAds } from '../../src/scraper/meta-ad-scraper.js';
 import { ExecutionLogger } from '../../src/mcp/execution-logger.js';
 import { sanitizeExtractionError, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageRequest, type BrowserPageResponse } from '../../src/scraper/scraper-types.js';
-import { buildNetworkEvidence, effectiveBodyLimit, networkEvidenceSummary } from '../../src/scraper/network-evidence.js';
+import { buildNetworkEvidence, classifyDiagnostic, effectiveBodyLimit, networkEvidenceSummary } from '../../src/scraper/network-evidence.js';
 
 type PageEvent = unknown | BrowserPageResponse | { requestFailed: BrowserPageRequest };
 
@@ -71,6 +71,26 @@ describe('extraction diagnostic sanitization', () => {
     expect(diagnostic.userMessage).toContain('no se recuperaron');
     expect(diagnostic.technicalDetail).not.toContain('eyJhbGci');
     expect(diagnostic.technicalDetail).not.toContain('/Users/test');
+  });
+});
+
+describe('diagnostic activation contract', () => {
+  it('keeps the successful timeline buffered while persisting its summary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'diagnostic-activation-'));
+    const logger = new ExecutionLogger(root, 'success');
+    await scrapeMetaAds({ query: 'ok', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(new InstrumentedPage([[graphqlResponse([fixtureAd('ok')], false)]]), { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: logger.scraperLogger() });
+    const diagnostic = await readFile(logger.diagnosticPath, 'utf8');
+    expect(diagnostic).toContain('diagnostic.summary'); expect(diagnostic).not.toContain('diagnostic.navigation'); expect(diagnostic).not.toContain('diagnostic.graphql'); await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe('diagnostic classification precedence', () => {
+  const base = { challenge: false, captcha: false, login: false, ssrResults: false, explicitEmpty: false, shellWithoutResults: false, resultCount: 0, connectionCount: 0 };
+  it.each([
+    ['network_failure', {}, true, false], ['challenge_or_http_block', { challenge: true }, false, false], ['captcha', { captcha: true }, false, false], ['ssr_results', { ssrResults: true }, false, false],
+    ['explicit_empty', { explicitEmpty: true }, false, false], ['login_required', { login: true }, false, false], ['shell_without_results', { shellWithoutResults: true }, false, false], ['unknown', {}, false, false]
+  ])('classifies %s deterministically', (expected, signals, networkFailure, httpBlock) => {
+    expect(classifyDiagnostic({ ...base, ...signals, ...(expected === 'unknown' ? {} : {}) }, networkFailure, httpBlock)).toBe(expected);
   });
 });
 
@@ -296,9 +316,19 @@ describe('Meta Ad scraper', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('uses all three backoffs and no fourth attempt', async () => {
-    const page = new InstrumentedPage([[], [], [], []], 4); const waits: number[] = [];
-    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: async (ms) => { waits.push(ms); }, random: () => 0 });
+    const page = new InstrumentedPage([[], [], [], []], 4); const waits: number[] = []; const root = await mkdtemp(join(tmpdir(), 'scraper-retries-summary-')); const logger = new ExecutionLogger(root, 'retries-task');
+    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: async (ms) => { waits.push(ms); }, random: () => 0, logger: logger.scraperLogger() });
     expect(result.status).toBe('incompleta'); expect(result.stopReason).toBe('retries_exhausted'); expect(page.gotoUrls).toHaveLength(4);
     expect(waits.filter((ms) => [60000, 120000, 240000].includes(ms))).toEqual([60000, 120000, 240000]);
+    expect(await readFile(logger.diagnosticPath, 'utf8')).toContain('diagnostic.summary'); await rm(root, { recursive: true, force: true });
+  });
+  it('writes a diagnostic summary when browser setup fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'scraper-error-summary-')); const logger = new ExecutionLogger(root, 'error-task');
+    try {
+      const launcher: BrowserLauncher = { launch: async () => { throw new Error('browser unavailable'); } };
+      const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher, logger: logger.scraperLogger() });
+      expect(result.stopReason).toBe('error');
+      expect(await readFile(logger.diagnosticPath, 'utf8')).toContain('diagnostic.summary');
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

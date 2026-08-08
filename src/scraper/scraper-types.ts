@@ -4,6 +4,18 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 export type ScrapeStatus = 'completa' | 'incompleta' | 'bloqueada';
 export type ExtractionStatus = 'completada' | 'fallida' | 'parcial';
 export type StopReason = 'ad_limit' | 'end_of_results' | 'no_new_ads' | 'rate_limit' | 'retries_exhausted' | 'unrecognized_response' | 'empty_capture' | 'error';
+export type DiagnosticPrimaryClassification = 'network_failure' | 'challenge_or_http_block' | 'captcha' | 'ssr_results' | 'explicit_empty' | 'login_required' | 'shell_without_results' | 'unknown';
+export type DiagnosticTrigger = 'empty_capture' | 'unrecognized_response' | 'error' | 'retries_exhausted' | 'rate_limit' | 'challenge' | 'captcha' | 'login_required' | 'unknown';
+export type DiagnosticEventFamily = 'navigation' | 'graphql' | 'runtime' | 'dom' | 'summary' | 'truncation';
+export type DiagnosticPriority = 'high' | 'normal' | 'low';
+export interface DiagnosticNavigationEvent { family: 'navigation'; type: 'diagnostic.navigation'; url?: string; status?: number; contentType?: string; resourceType?: string; durationMs?: number; redirectCount?: number; host?: string; }
+export interface DiagnosticGraphQlEvent { family: 'graphql'; type: 'diagnostic.graphql'; friendlyName?: string; docId?: string; status?: number; responseBytes?: number; durationMs?: number; classification?: string; }
+export interface DiagnosticRuntimeEvent { family: 'runtime'; type: 'diagnostic.runtime'; kind: 'console' | 'pageerror' | 'requestfailed' | 'browser'; message?: string; name?: string; metadata?: Record<string, unknown>; }
+export interface DiagnosticDomEvent { family: 'dom'; type: 'diagnostic.dom'; signals: DiagnosticDomSignals; }
+export interface DiagnosticDomSignals { challenge: boolean; captcha: boolean; login: boolean; ssrResults: boolean; explicitEmpty: boolean; shellWithoutResults: boolean; resultCount: number; connectionCount: number; }
+export interface DiagnosticSummary { family: 'summary'; type: 'diagnostic.summary'; primary: DiagnosticPrimaryClassification; secondary: string[]; signals: DiagnosticDomSignals; durationMs: number; eventCount: number; droppedEvents: number; diagnosticIncomplete: boolean; }
+export interface DiagnosticTruncatedEvent { family: 'truncation'; type: 'diagnostic.truncated'; droppedEvents: number; diagnosticIncomplete: true; }
+export type DiagnosticEvent = (DiagnosticNavigationEvent | DiagnosticGraphQlEvent | DiagnosticRuntimeEvent | DiagnosticDomEvent | DiagnosticSummary | DiagnosticTruncatedEvent) & { timestamp?: string; priority?: DiagnosticPriority; [key: string]: unknown };
 export interface NetworkEvidenceClassification { label: 'possible_redirect' | 'possible_login' | 'possible_http_block' | 'possible_network_failure' | 'unknown'; signals: string[] }
 export interface NetworkEvidenceHop { url: string; status?: number; destination?: string }
 export interface NetworkEvidenceSummary { evidenceId: string; logReference: string; responsePresent: boolean; status?: number; contentType?: string; url?: string; kind?: 'document' | 'network_failure'; failureText?: string; hops?: NetworkEvidenceHop[]; classification?: NetworkEvidenceClassification }
@@ -15,8 +27,9 @@ export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; 
 
 export type LoggerEvent =
   | { type: 'start' | 'finish' | 'batch' | 'persist' | 'blocked' | 'retry' | 'browser' | 'search'; query: string; [key: string]: unknown }
+  | { type: 'diagnostic'; query: string; event: DiagnosticEvent; reinforced?: boolean; [key: string]: unknown }
   | { type: 'error'; query: string; message: string; error?: unknown; [key: string]: unknown };
-export type Logger = (event: LoggerEvent) => void;
+export type Logger = ((event: LoggerEvent) => void) & { diagnosticState?: DiagnosticState };
 export interface Clock { now(): number }
 export type Sleeper = (milliseconds: number) => Promise<void>;
 export type Random = () => number;
@@ -49,15 +62,21 @@ export function sanitizeExtractionError(error: unknown, hasRecords: boolean): Ex
 
 export interface BrowserPageRequest { url(): string; redirectedFrom?(): BrowserPageRequest | null; resourceType?(): string; failure?(): { errorText?: string } | null; response?(): Promise<BrowserPageResponse | null> }
 export interface BrowserPageResponse { url(): string; json(): Promise<unknown>; request?(): BrowserPageRequest; status?(): number; headers?(): Record<string, string>; text?(): Promise<string>; allHeaders?(): Promise<Record<string, string>> }
+export interface BrowserConsoleMessage { type?(): string; text?(): string; }
+export interface BrowserPageMetadata { browserName?: string; browserVersion?: string; locale?: string; timezone?: string; viewport?: { width: number; height: number }; webdriver?: boolean; cookieNames?: string[]; }
 export interface BrowserPage {
   on(event: 'response', listener: (response: BrowserPageResponse) => void | Promise<void>): void;
   on(event: 'requestfailed', listener: (request: BrowserPageRequest) => void | Promise<void>): void;
+  onConsole?(listener: (message: BrowserConsoleMessage) => void | Promise<void>): void;
+  onPageError?(listener: (error: Error) => void | Promise<void>): void;
   goto(url: string): Promise<unknown>;
   evaluate(script: () => void): Promise<unknown>;
   close(): Promise<void>;
   url?(): string;
+  diagnosticSignals?(): Promise<DiagnosticDomSignals>;
+  browserMetadata?(): Promise<BrowserPageMetadata>;
 }
-export interface BrowserContext { newPage(): Promise<BrowserPage>; close(): Promise<void> }
+export interface BrowserContext { newPage(): Promise<BrowserPage>; close(): Promise<void>; diagnosticMetadata?(): Promise<BrowserPageMetadata> }
 export interface Browser { newContext(options?: Record<string, unknown>): Promise<BrowserContext>; close(): Promise<void> }
 export interface BrowserLauncher { launch(options: { headless: true }): Promise<Browser> }
 export interface MetaAdScraperOptions {
@@ -72,6 +91,15 @@ export interface MetaAdScraperOptions {
   maxSourceAds?: number;
   diagnosticsEnabled?: boolean;
   networkEvidenceBodyLimitBytes?: number;
+  diagnosticState?: DiagnosticState;
+}
+
+export interface DiagnosticState {
+  readonly diagnosticPath?: string;
+  readonly diagnosticReference?: string;
+  readonly droppedDiagnosticEvents?: number;
+  readonly diagnosticIncomplete?: boolean;
+  readonly diagnosticSummaryEvent?: DiagnosticSummary;
 }
 
 export interface ParsedBatch { ads: AdInput[]; hasNextPage: boolean; endCursor: string | null; sourceIds: string[] }

@@ -61,6 +61,15 @@ describe('scrape runner and persisted output', () => {
     expect(result.diagnostic).toMatchObject({ responsePresent: false, evidenceId: expect.any(String), logReference: expect.stringContaining('scraper.network_evidence:') });
     expect(serialized).not.toContain('body');
   });
+  it('writes a relative diagnostic reference and metrics to execution logs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'runner-diagnostic-log-')); const logger = new ExecutionLogger(root, 'diagnostic-task');
+    try {
+      await runScrape({ query: 'diagnostic', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { ...options(new RunnerPage([[]]), undefined as never), captureTimeoutMs: 1, logger: logger.scraperLogger() });
+      const content = await readFile(logger.executionPath, 'utf8');
+      expect(content).toContain('logs/diagnostic.jsonl'); expect(content).toContain('droppedEvents'); expect(content).toContain('diagnosticIncomplete');
+      expect(content).not.toContain('authorization');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it('decodes legacy envelopes without evidence fields', () => {
     const legacy = JSON.stringify({ query: 'legacy', records: [], summary: { query: 'legacy', count: 0, status: 'completa', stopReason: 'end_of_results', durationMs: 1 }, incomplete: false });
     expect(decodeScrapeEnvelope(legacy)).toMatchObject({ query: 'legacy', incomplete: false });

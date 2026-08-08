@@ -4,9 +4,9 @@ import type { NormalizedAdRecord } from '../domain/ad-model.js';
 import { isGraphQlEndpoint, parseGraphQlResponse } from './graphql-response-parser.js';
 import { waitForRetry } from './retry-policy.js';
 import { waitForThrottle } from './timing-policy.js';
-import { buildNetworkEvidence, classifyNetworkEvidence, isEligibleDocument, isGraphQlUrl, networkEvidenceSummary, redirectHops, type NetworkEvidence } from './network-evidence.js';
+import { buildNetworkEvidence, classifyDiagnostic, classifyNetworkEvidence, isEligibleDocument, isGraphQlUrl, networkEvidenceSummary, redirectHops, sanitizeDiagnosticText, type NetworkEvidence } from './network-evidence.js';
 import type { AdInput } from '../domain/ad-input.js';
-import { extractionStatusFor, sanitizeExtractionError, type Browser, type BrowserLauncher, type BrowserPage, type BrowserPageRequest, type BrowserPageResponse, type CaptureWindow, type Clock, type ExtractionDiagnostic, type ExtractionStatus, type Logger, type MetaAdScraperOptions, type Random, type ScrapeRequest, type ScrapeStatus, type Sleeper, type StopReason } from './scraper-types.js';
+import { extractionStatusFor, sanitizeExtractionError, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageRequest, type BrowserPageResponse, type CaptureWindow, type Clock, type DiagnosticDomSignals, type DiagnosticTrigger, type ExtractionDiagnostic, type ExtractionStatus, type Logger, type MetaAdScraperOptions, type Random, type ScrapeRequest, type ScrapeStatus, type Sleeper, type StopReason } from './scraper-types.js';
 export type { MetaAdScraperOptions } from './scraper-types.js';
 
 const defaultLauncher: BrowserLauncher = { launch: (options) => chromium.launch(options) as unknown as Promise<Browser> };
@@ -24,7 +24,8 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? defaultRandom;
   const clock = options.clock ?? defaultClock;
-  const logger = options.logger ?? (() => undefined);
+  const logger: Logger = options.logger ?? (() => undefined);
+  const diagnosticState = options.diagnosticState ?? logger.diagnosticState;
   const captureTimeoutMs = options.captureTimeoutMs ?? 2000;
   const captureWindow: CaptureWindow = options.captureWindow ?? ((nextGraphQlResponse) => waitForCaptureWindow(nextGraphQlResponse, captureTimeoutMs));
   const maxSourceAds = options.maxSourceAds ?? 1500;
@@ -34,7 +35,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const sourceIds = new Set<string>();
   const started = clock.now();
   let browser: Browser | undefined;
-  let context: { newPage(): Promise<BrowserPage>; close(): Promise<void> } | undefined;
+  let context: BrowserContext | undefined;
   let page: BrowserPage | undefined;
   let status: ScrapeStatus = 'completa';
   let stopReason: StopReason = 'end_of_results';
@@ -44,12 +45,24 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const networkEvidence: NetworkEvidence[] = [];
   let networkEvidenceBodyBytes = 0;
   let diagnosticIncomplete = false;
+  const domSignals: DiagnosticDomSignals = { challenge: false, captcha: false, login: false, ssrResults: false, explicitEmpty: false, shellWithoutResults: false, resultCount: 0, connectionCount: 0 };
+  let networkFailure = false;
+  let httpBlock = false;
+  let diagnosticEventCount = 0;
+  const diagnosticEvent = (event: Record<string, unknown>, reinforced = false): void => {
+    diagnosticEventCount++;
+    logger({ type: 'diagnostic', query: request.query, event: { ...event, priority: reinforced ? 'high' : 'low' } as never, reinforced });
+  };
   logger({ type: 'start', query: request.query });
   try {
     browser = await launcher.launch({ headless: true });
     context = await browser.newContext();
     page = await context.newPage();
     logger({ type: 'browser', query: request.query, message: 'browser.ready' });
+    try {
+      const metadata = await readBrowserMetadata(page, context);
+      diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'browser', metadata }, false);
+    } catch { diagnosticIncomplete = true; }
     const pending: Promise<void>[] = [];
     let finalRateLimit = false;
     let recognizedResponses = 0;
@@ -89,10 +102,12 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         const contentType = headers['content-type'] ?? headers['Content-Type'];
         const isHtml = Boolean(contentType && /text\/html|application\/xhtml\+xml/i.test(contentType));
         const isHttpError = status !== undefined && status >= 400 && status < 600;
+        if (isHttpError) httpBlock = true;
         const isTextualError = Boolean(contentType && /text\//i.test(contentType));
         const body = status !== undefined && status >= 300 && status < 400 ? undefined : (isHtml || (isHttpError && isTextualError)) && response.text ? await response.text() : undefined;
         const hops = request ? await redirectHops(request) : [];
         await collect(buildNetworkEvidence({ responsePresent: true, status, contentType, url: response.url(), body, hops, kind: 'document', bodyLimitBytes: networkEvidenceBodyLimitBytes }));
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', url: response.url(), status, contentType, resourceType: request?.resourceType?.(), redirectCount: hops.length }, false);
       } catch { diagnosticIncomplete = true; }
     };
     const publishNetworkEvidence = (reason: string, evidence: NetworkEvidence | NetworkEvidence[]): boolean => {
@@ -115,6 +130,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         const headers = response.headers ? response.headers() : {};
         const contentType = headers['content-type'] ?? headers['Content-Type'];
         const evidence = buildNetworkEvidence({ responsePresent: true, status: response.status?.(), contentType, url: response.url(), body, bodyLimitBytes: networkEvidenceBodyLimitBytes });
+        diagnosticEvent({ family: 'graphql', type: 'diagnostic.graphql', status: response.status?.(), responseBytes: Buffer.byteLength(body ?? '', 'utf8'), classification: reason }, false);
         if (publishNetworkEvidence(reason, evidence)) latestEvidence = evidence;
       };
       const task = response.json().then(async (payload) => {
@@ -145,12 +161,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       const task = (async () => {
         try {
           if (!isEligibleDocument(request)) return;
-          const failureText = request.failure?.()?.errorText;
+           const failureText = request.failure?.()?.errorText;
+           networkFailure = true;
+           diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'requestfailed', message: sanitizeDiagnosticText(failureText ?? 'request failed') }, true);
           await collect(buildNetworkEvidence({ responsePresent: false, url: request.url(), failureText, kind: 'network_failure' }));
         } catch { diagnosticIncomplete = true; }
       })();
       pending.push(task);
     });
+    installRuntimeAdapters(page, (message) => diagnosticEvent(message, message.kind === 'pageerror'));
     const url = `https://www.facebook.com/ads/library/?${new URLSearchParams({ q: request.query, country: request.country, ad_type: request.adType, start_date: String(toStartEpoch(request.dateFrom)), end_date: String(toEndEpoch(request.dateTo)) }).toString()}`;
     logger({ type: 'search', query: request.query, message: 'search.started' });
     let retryIndex = 0;
@@ -204,7 +223,38 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     primaryError = error;
     logger({ type: 'error', query: request.query, message: 'scraper.error', error, stopReason });
     if (!exhaustedRetries) { status = 'incompleta'; stopReason = 'error'; }
+    diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(errorMessage(error)) }, true);
   } finally {
+    if (page) {
+      try {
+        const observed = await readDiagnosticSignals(page, { ...domSignals, resultCount: records.length });
+        Object.assign(domSignals, observed);
+      } catch { diagnosticIncomplete = true; }
+    } else {
+      diagnosticIncomplete = true;
+    }
+    domSignals.resultCount = Math.max(domSignals.resultCount, records.length);
+    const primary = classifyDiagnostic(domSignals, networkFailure, httpBlock);
+    const finalStopReason = stopReason as StopReason;
+    const trigger: DiagnosticTrigger | undefined = finalStopReason === 'rate_limit'
+      ? 'rate_limit'
+      : finalStopReason === 'empty_capture'
+        ? 'empty_capture'
+        : finalStopReason === 'unrecognized_response'
+          ? 'unrecognized_response'
+          : finalStopReason === 'error'
+            ? 'error'
+            : finalStopReason === 'retries_exhausted'
+              ? 'retries_exhausted'
+              : primary === 'challenge_or_http_block'
+                ? 'challenge'
+                : primary === 'captcha'
+                  ? 'captcha'
+                  : primary === 'login_required'
+                    ? 'login_required'
+                    : primary === 'unknown' && records.length === 0 ? 'unknown' : undefined;
+    diagnosticEvent({ family: 'dom', type: 'diagnostic.dom', signals: domSignals }, Boolean(trigger));
+    diagnosticEvent({ family: 'summary', type: 'diagnostic.summary', primary, secondary: [], signals: domSignals, durationMs: clock.now() - started, eventCount: diagnosticEventCount + 1, droppedEvents: diagnosticState?.droppedDiagnosticEvents ?? 0, diagnosticIncomplete: diagnosticIncomplete || Boolean(diagnosticState?.diagnosticIncomplete) || Boolean(trigger && options.diagnosticsEnabled === false) }, Boolean(trigger));
     for (const [name, resource] of [['page', page], ['context', context], ['browser', browser]] as const) {
       if (!resource) continue;
       try { await resource.close(); } catch (error) { logger({ type: 'finish', query: request.query, cleanupError: `${name}: ${errorMessage(error)}` }); }
@@ -218,6 +268,48 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response' || stopReason === 'empty_capture', records.length), ...(diagnostic ? { diagnostic } : {}) };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
+}
+
+function installRuntimeAdapters(page: BrowserPage, emit: (event: Record<string, unknown>) => void): void {
+  if (page.onConsole && page.onPageError) {
+    page.onConsole((message) => emit({ family: 'runtime', type: 'diagnostic.runtime', kind: 'console', name: sanitizeDiagnosticText(message.type?.() ?? 'log'), message: sanitizeDiagnosticText(message.text?.() ?? '') }));
+    page.onPageError((error) => emit({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(error.message), name: error.name }));
+    return;
+  }
+  const realPageObject = page as unknown as { context?: () => unknown; on(event: string, listener: (value: unknown) => void): void };
+  if (typeof realPageObject.context !== 'function') return;
+  const realPage = realPageObject;
+  realPage.on('console', (message) => {
+    const value = message as { type?: () => string; text?: () => string };
+    emit({ family: 'runtime', type: 'diagnostic.runtime', kind: 'console', name: sanitizeDiagnosticText(value.type?.() ?? 'log'), message: sanitizeDiagnosticText(value.text?.() ?? '') });
+  });
+  realPage.on('pageerror', (error) => {
+    const value = error as Error;
+    emit({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(value.message), name: value.name });
+  });
+}
+
+async function readDiagnosticSignals(page: BrowserPage, fallback: DiagnosticDomSignals): Promise<DiagnosticDomSignals> {
+  if (page.diagnosticSignals) return page.diagnosticSignals();
+  const realPageObject = page as unknown as { context?: () => unknown; evaluate(script: () => unknown): Promise<unknown> };
+  if (typeof realPageObject.context !== 'function') return fallback;
+  const realPage = realPageObject;
+  const value = await realPage.evaluate(() => {
+    const text = document.body?.innerText ?? '';
+    const resultCount = document.querySelectorAll('[role="article"], [data-testid*="ad_archive_id"]').length;
+    return { challenge: /challenge|unusual activity|blocked/i.test(text), captcha: /captcha/i.test(text), login: /log in|inicia sesión|iniciar sesión/i.test(text), ssrResults: resultCount > 0, explicitEmpty: /no results|sin resultados|no ads/i.test(text), shellWithoutResults: Boolean(document.body) && resultCount === 0, resultCount, connectionCount: document.querySelectorAll('[data-testid*="connection"], [role="article"]').length };
+  });
+  return value && typeof value === 'object' ? { ...fallback, ...(value as Partial<DiagnosticDomSignals>) } : fallback;
+}
+
+async function readBrowserMetadata(page: BrowserPage, context: BrowserContext): Promise<Record<string, unknown>> {
+  if (page.browserMetadata) return page.browserMetadata() as Promise<Record<string, unknown>>;
+  if (context.diagnosticMetadata) return context.diagnosticMetadata() as Promise<Record<string, unknown>>;
+  const realPageObject = page as unknown as { context?: () => unknown; evaluate(script: () => unknown): Promise<unknown> };
+  if (typeof realPageObject.context !== 'function') return {};
+  const realPage = realPageObject;
+  const value = await realPage.evaluate(() => ({ locale: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, webdriver: navigator.webdriver === true, viewport: { width: window.innerWidth, height: window.innerHeight }, cookieNames: document.cookie.split(';').map((item) => item.split('=')[0].trim()).filter(Boolean) }));
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
 function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence?: NetworkEvidence, networkEvidence: NetworkEvidence[] = [], diagnosticIncomplete = false): ExtractionDiagnostic {
