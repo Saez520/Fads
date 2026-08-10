@@ -3,11 +3,12 @@ import type { GraphQlError, GraphQlParseResult, SsrParseResult } from './scraper
 
 const endpoint = 'https://www.facebook.com/api/graphql/';
 function record(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+type ConnectionMode = 'SSR' | 'GraphQL';
 
-function batchFromConnection(connection: Record<string, unknown>, requirePageInfo: boolean, strict = true): SsrParseResult {
+function batchFromConnection(connection: Record<string, unknown>, mode: ConnectionMode): SsrParseResult {
   if (!Array.isArray(connection.edges)) return { classification: 'incomplete' };
   const pageInfo = record(connection.page_info);
-  if (requirePageInfo && typeof pageInfo?.has_next_page !== 'boolean') return { classification: 'incomplete' };
+  if (mode === 'SSR' && typeof pageInfo?.has_next_page !== 'boolean') return { classification: 'incomplete' };
   const ads: AdInput[] = [];
   const ids = new Set<string>();
   for (const edge of connection.edges) {
@@ -16,7 +17,7 @@ function batchFromConnection(connection: Record<string, unknown>, requirePageInf
     for (const item of collated) {
       const ad = record(item);
       if (typeof ad?.ad_archive_id !== 'string') {
-        if (strict) return { classification: 'incomplete' };
+        if (mode === 'SSR') return { classification: 'incomplete' };
         continue;
       }
       if (ids.has(ad.ad_archive_id)) continue;
@@ -70,7 +71,8 @@ export function parseSsrSearchResultsConnection(html: string): SsrParseResult {
       if (!Object.prototype.hasOwnProperty.call(object, 'search_results_connection')) return undefined;
       found = true;
       const connection = record(object.search_results_connection);
-      return connection ? batchFromConnection(connection, true) : { classification: 'incomplete' };
+      const parsed = connection ? batchFromConnection(connection, 'SSR') : { classification: 'incomplete' as const };
+      return parsed.classification === 'incomplete' ? undefined : parsed;
     });
     if (result && result.classification !== 'incomplete') return result;
   }
@@ -88,7 +90,7 @@ export function parseGraphQlResponse(payload: unknown): GraphQlParseResult {
   const connection = record(main?.search_results_connection);
   if (finalRateLimit) return { errors, relevant: false, finalRateLimit, classification: 'finalRateLimit', rawResponse: payload };
   if (!connection || !Array.isArray(connection.edges)) return { errors, relevant: false, finalRateLimit, classification: 'unrecognized', rawResponse: payload };
-  const parsed = batchFromConnection(connection, false, false);
+  const parsed = batchFromConnection(connection, 'GraphQL');
   if (!parsed.batch) return { errors, relevant: false, finalRateLimit, classification: 'unrecognized', rawResponse: payload };
   const batch = parsed.batch;
   return { batch, errors, relevant: true, finalRateLimit, classification: batch.ads.length === 0 ? 'empty' : 'recognized', rawResponse: payload };

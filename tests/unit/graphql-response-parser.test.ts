@@ -36,4 +36,12 @@ describe('GraphQL response parser', () => {
     const html = '<script>{"search_results_connection":{"edges":[{"node":{"collated_results":[{"page_name":"invalid"}]}}],"page_info":{"has_next_page":false}}}</script>';
     expect(parseSsrSearchResultsConnection(html)).toMatchObject({ classification: 'incomplete' });
   });
+  it('continues past an incomplete SSR sibling to find a valid connection', () => {
+    const html = '<script>{"first":{"search_results_connection":{"edges":[{"node":{"collated_results":[{"invalid":true}]}}],"page_info":{"has_next_page":false}}},"second":{"search_results_connection":{"edges":[{"node":{"collated_results":[{"ad_archive_id":"later-valid"}]}}],"page_info":{"has_next_page":false}}}}</script>';
+    expect(parseSsrSearchResultsConnection(html)).toMatchObject({ classification: 'recognized', batch: { sourceIds: ['later-valid'] } });
+  });
+  it('returns incomplete when all SSR connections are incomplete', () => {
+    const html = '<script>{"first":{"search_results_connection":{"edges":[],"page_info":{}}},"second":{"search_results_connection":{"edges":[{"node":{"collated_results":[{"invalid":true}]}}],"page_info":{"has_next_page":false}}}}</script>';
+    expect(parseSsrSearchResultsConnection(html)).toMatchObject({ classification: 'incomplete' });
+  });
 });
