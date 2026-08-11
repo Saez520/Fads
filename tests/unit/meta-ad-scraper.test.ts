@@ -18,7 +18,7 @@ class InstrumentedPage implements BrowserPage {
   contentCount = 0;
   closeCount = 0;
   private responseIndex = 0;
-  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0, private readonly evaluateFailures = 0, private readonly responseDelaysMs: number[] = [], private readonly postRenderHtml = '') {}
+  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0, private readonly evaluateFailures = 0, private readonly responseDelaysMs: number[] = [], private readonly postRenderHtml = '', private readonly evaluateFailureIndexes: number[] = []) {}
   on(event: 'response' | 'requestfailed', listener: ((response: BrowserPageResponse) => void | Promise<void>) | ((request: BrowserPageRequest) => void | Promise<void>)): void {
     if (event === 'response') this.responseListener = listener as (response: BrowserPageResponse) => void | Promise<void>;
     else this.requestFailedListener = listener as (request: BrowserPageRequest) => void | Promise<void>;
@@ -34,7 +34,7 @@ class InstrumentedPage implements BrowserPage {
     if (this.gotoUrls.length - 1 <= this.reloadFailures) throw new Error('reload aborted');
      this.scheduleResponse();
   }
-  async evaluate(): Promise<void> { this.evaluateCount++; if (this.evaluateCount <= this.evaluateFailures) throw new Error('page unavailable'); this.emit(this.responses.shift() ?? []); }
+  async evaluate(): Promise<void> { this.evaluateCount++; if (this.evaluateCount <= this.evaluateFailures || this.evaluateFailureIndexes.includes(this.evaluateCount)) throw new Error('page unavailable'); this.emit(this.responses.shift() ?? []); }
   async content(): Promise<string> { this.contentCount++; return this.postRenderHtml; }
   async close(): Promise<void> { this.closeCount++; }
   private scheduleResponse(): void {
@@ -425,6 +425,34 @@ describe('Meta Ad scraper', () => {
     const result = await scrapeMetaAds({ query: 'post-render', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result.sourceCount).toBe(1);
     expect(page.contentCount).toBe(1);
+  });
+  it('does not classify the global login text when post-render SSR has ads', async () => {
+    const body = `<script>${JSON.stringify({ bootstrap: { search_results_connection: { edges: [{ node: { collated_results: [fixtureAd('login-with-ads')] } }], page_info: { has_next_page: false } } } })}</script>`;
+    const page = new InstrumentedPage([[documentResponse('https://example.test/login', '<html>Iniciar sesión</html>')]], 0, undefined, 0, 0, 0, [], body);
+    const result = await scrapeMetaAds({ query: 'login-with-ads', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(result).toMatchObject({ status: 'completa', sourceCount: 1 });
+  });
+  it('accumulates multiple GraphQL pagination batches through the combined interaction', async () => {
+    const page = new InstrumentedPage([
+      [graphqlResponse([fixtureAd('page-1')], true)],
+      [],
+      [graphqlResponse([fixtureAd('page-2')], true)],
+      [graphqlResponse([fixtureAd('page-3')], false)],
+    ]);
+    const result = await scrapeMetaAds({ query: 'multi-page', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(result).toMatchObject({ status: 'completa', stopReason: 'end_of_results', sourceCount: 3 });
+    expect(page.evaluateCount).toBe(3);
+  });
+  it('keeps the scroll-only outcome when no pagination button is available', async () => {
+    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('scroll-only')], true)], [], []]);
+    const result = await scrapeMetaAds({ query: 'scroll-only', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    expect(result).toMatchObject({ status: 'incompleta', stopReason: 'unrecognized_response', sourceCount: 1, extractionStatus: 'parcial' });
+    expect(page.evaluateCount).toBe(2);
+  });
+  it('keeps captured records when the combined pagination interaction fails', async () => {
+    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('partial-page')], true)], []], 0, undefined, 0, 0, 0, [], '', [2, 3, 4]);
+    const result = await scrapeMetaAds({ query: 'partial-page', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1 });
+    expect(result).toMatchObject({ status: 'incompleta', stopReason: 'unrecognized_response', extractionStatus: 'parcial', sourceCount: 1 });
   });
   it('terminates explicitly for CAPTCHA or login documents', async () => {
     const page = new InstrumentedPage([[documentResponse('https://example.test/login', '<html>captcha required</html>')]]);

@@ -104,6 +104,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     let discardedResponses = 0;
     let responseReadError: unknown;
     let hasNextPage = true;
+    let loginTextDetected = false;
     let latestIds = 0;
     let captureSignal: Deferred<import('./scraper-types.js').CaptureSignal> | undefined;
     const collect = async (evidence: NetworkEvidence): Promise<void> => {
@@ -152,7 +153,8 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         hasNextPage = parsed.batch.hasNextPage;
         recognizedResponses++;
         await ingestBatch(parsed.batch);
-        captureSignal?.resolve('ssr_batch');
+        if (loginTextDetected && sourceIds.size === 0) captureSignal?.resolve('captcha_or_login');
+        else captureSignal?.resolve('ssr_batch');
       } catch (error) {
         diagnosticIncomplete = true;
         diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(errorMessage(error)) }, false);
@@ -176,7 +178,13 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', url: response.url(), status, contentType, resourceType: request?.resourceType?.(), redirectCount: hops.length }, false);
         const blockText = `${response.url()} ${body ?? ''}`;
         if (blockStatus || /rd_challenge|challenge|blocked|forbidden/i.test(blockText)) { domSignals.challenge = true; captureSignal?.resolve('challenge_or_http_block'); return; }
-        if (/captcha|log in|login|inicia sesión|checkpoint/i.test(blockText)) { domSignals.captcha = /captcha/i.test(blockText); domSignals.login = !domSignals.captcha; captureSignal?.resolve('captcha_or_login'); return; }
+        if (/captcha|log in|login|inicia sesión|checkpoint/i.test(blockText)) {
+          domSignals.captcha = /captcha/i.test(blockText);
+          domSignals.login = !domSignals.captcha;
+          if (domSignals.captcha) captureSignal?.resolve('captcha_or_login');
+          else loginTextDetected = true;
+          return;
+        }
         if (isHttpError) { captureSignal?.resolve('http_error'); return; }
         if (body) {
           const parsed = parseSsrSearchResultsConnection(body);
@@ -290,6 +298,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     };
     const runInitialPostRender = async (): Promise<void> => {
       await capturePostRenderSsr();
+      if (loginTextDetected && sourceIds.size === 0) captureSignal?.resolve('captcha_or_login');
       await runBootstrap();
     };
     const initialStarted = clock.now();
@@ -359,15 +368,20 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       try {
         if (!page) throw new Error('page_unavailable');
         const paginationPage = page;
-        initialSignal = await action(() => paginationPage.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
-        if (initialSignal === 'timeout' && !finalRateLimit && sourceIds.size < maxSourceAds) {
-          initialSignal = await action(() => paginationPage.evaluate(() => {
-            const normalize = (value: string): string => value.replace(/[\s\u00a0]+/g, ' ').trim();
-            const button = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => normalize(element.textContent ?? '') === 'Ver más') as HTMLElement | undefined;
-            button?.click();
-            return Boolean(button);
-          }));
-        }
+        initialSignal = await action(() => paginationPage.evaluate(() => {
+          window.scrollTo(0, document.body.scrollHeight);
+          const normalize = (value: string): string => value.replace(/[\s\u00a0]+/g, ' ').trim();
+          const isVisible = (element: Element): boolean => {
+            const node = element as HTMLElement;
+            const style = window.getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+          const isCreativeControl = (element: Element): boolean => Boolean(element.closest('[role="article"], [data-testid*="ad_archive_id"], [data-testid*="ad-card"], [data-testid*="ad_archive"]'));
+          const button = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => isVisible(element) && !isCreativeControl(element) && normalize(element.textContent ?? '') === 'Ver más') as HTMLElement | undefined;
+          button?.click();
+          return Boolean(button);
+        }));
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.completed`, phase: 'scroll', operation: 'pagination', outcome: 'succeeded', signal: initialSignal, durationMs: clock.now() - phaseStarted }, false);
       } catch (error) {
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.failed`, phase: 'scroll', operation: 'pagination', outcome: 'failed', cause: !page ? 'page_unavailable' : sanitizeDiagnosticText(errorMessage(error)), durationMs: clock.now() - phaseStarted }, true);
