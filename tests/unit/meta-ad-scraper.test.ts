@@ -273,6 +273,30 @@ describe('Meta Ad scraper', () => {
     await scrapeMetaAds({ query: 'empty', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', contentLanguages: [] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(new URL(page.gotoUrls[0]).searchParams.has('content_languages[0]')).toBe(false);
   });
+  it('serializes publisher platforms in input order', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'platforms', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', publisherPlatforms: ['facebook', 'instagram', 'audience_network', 'messenger', 'whatsapp'] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('publisher_platforms[0]')).toBe('facebook');
+    expect(url.searchParams.get('publisher_platforms[1]')).toBe('instagram');
+    expect(url.searchParams.get('publisher_platforms[2]')).toBe('audience_network');
+    expect(url.searchParams.get('publisher_platforms[3]')).toBe('messenger');
+    expect(url.searchParams.get('publisher_platforms[4]')).toBe('whatsapp');
+  });
+  it('serializes exact phrase search and combined filters without unexpected parameters', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'café & té', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', mediaType: 'image', activeStatus: 'active', contentLanguages: ['es'], publisherPlatforms: ['instagram', 'facebook'], searchType: 'keyword_exact_phrase' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('search_type')).toBe('keyword_exact_phrase');
+    expect(url.searchParams.get('publisher_platforms[0]')).toBe('instagram');
+    expect(url.searchParams.get('publisher_platforms[1]')).toBe('facebook');
+    expect([...url.searchParams.keys()]).toEqual(['q', 'active_status', 'ad_type', 'country', 'is_targeted_country', 'media_type', 'search_type', 'start_date[min]', 'start_date[max]', 'content_languages[0]', 'publisher_platforms[0]', 'publisher_platforms[1]']);
+  });
+  it('does not add publisher platform parameters for an empty list', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'empty platforms', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', publisherPlatforms: [] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect([...new URL(page.gotoUrls[0]).searchParams.keys()].some((key) => key.startsWith('publisher_platforms['))).toBe(false);
+  });
   it.each([
     ['mediaType', { mediaType: 'audio' }],
     ['activeStatus', { activeStatus: 'paused' }],
@@ -280,6 +304,11 @@ describe('Meta Ad scraper', () => {
     ['contentLanguages[0]', { contentLanguages: ['ES'] }],
     ['contentLanguages[0]', { contentLanguages: ['spa'] }],
     ['contentLanguages[0]', { contentLanguages: [7] }],
+    ['publisherPlatforms', { publisherPlatforms: 'facebook' }],
+    ['publisherPlatforms[0]', { publisherPlatforms: ['threads'] }],
+    ['publisherPlatforms[0]', { publisherPlatforms: [7] }],
+    ['searchType', { searchType: 'keyword_ordered' }],
+    ['searchType', { searchType: 7 }],
   ])('rejects invalid %s', (_field, extra) => {
     expect(() => validateScrapeRequest({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', ...extra })).toThrow();
   });

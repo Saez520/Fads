@@ -571,9 +571,10 @@ function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence
 function buildSearchUrl(request: ScrapeRequest): string {
   const params = new URLSearchParams();
   params.set('q', request.query); params.set('active_status', request.activeStatus ?? 'all'); params.set('ad_type', request.adType); params.set('country', request.country);
-  params.set('is_targeted_country', 'false'); params.set('media_type', request.mediaType ?? 'all'); params.set('search_type', 'keyword_unordered');
+  params.set('is_targeted_country', 'false'); params.set('media_type', request.mediaType ?? 'all'); params.set('search_type', request.searchType ?? 'keyword_unordered');
   params.set('start_date[min]', request.dateFrom); params.set('start_date[max]', request.dateTo);
   request.contentLanguages?.forEach((language, index) => params.set(`content_languages[${index}]`, language));
+  request.publisherPlatforms?.forEach((platform, index) => params.set(`publisher_platforms[${index}]`, platform));
   return `https://www.facebook.com/ads/library/?${params.toString()}`;
 }
 

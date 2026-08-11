@@ -30,6 +30,8 @@ export interface ScrapeRequest {
   mediaType?: 'image' | 'video' | 'all';
   activeStatus?: 'active' | 'inactive' | 'all';
   contentLanguages?: string[];
+  publisherPlatforms?: string[];
+  searchType?: 'keyword_unordered' | 'keyword_exact_phrase';
 }
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
@@ -129,7 +131,7 @@ export function validateScrapeRequest(value: unknown): ScrapeRequest {
 export function validateStructuredRequest(value: unknown, context = 'solicitud'): ScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${context} inválida: debe ser un objeto.`);
   const input = value as Record<string, unknown>;
-  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType', 'mediaType', 'activeStatus', 'contentLanguages'];
+  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType', 'mediaType', 'activeStatus', 'contentLanguages', 'publisherPlatforms', 'searchType'];
   if (Object.keys(input).some((key) => !expected.includes(key))) throw new Error(`${context} inválida: no se permiten campos desconocidos.`);
   if (typeof input.query !== 'string' || input.query.trim() === '') throw new Error('query debe ser un texto no vacío.');
   if (typeof input.country !== 'string' || !/^[A-Z]{2}$/.test(input.country)) throw new Error('country debe tener exactamente dos letras ASCII mayúsculas.');
@@ -151,6 +153,18 @@ export function validateStructuredRequest(value: unknown, context = 'solicitud')
       }
     });
   }
+  if (input.publisherPlatforms !== undefined) {
+    if (!Array.isArray(input.publisherPlatforms)) throw new Error('publisherPlatforms debe ser un array de strings.');
+    const allowedPlatforms = ['facebook', 'instagram', 'audience_network', 'messenger', 'whatsapp'];
+    input.publisherPlatforms.forEach((platform, index) => {
+      if (typeof platform !== 'string' || !allowedPlatforms.includes(platform)) {
+        throw new Error(`publisherPlatforms[${index}] no es una plataforma válida (valor: ${String(platform)}).`);
+      }
+    });
+  }
+  if (input.searchType !== undefined && input.searchType !== 'keyword_unordered' && input.searchType !== 'keyword_exact_phrase') {
+    throw new Error(`searchType no es válido (valor: ${String(input.searchType)}).`);
+  }
   return {
     query: input.query.trim(),
     country: input.country,
@@ -160,6 +174,8 @@ export function validateStructuredRequest(value: unknown, context = 'solicitud')
     ...(input.mediaType !== undefined ? { mediaType: input.mediaType } : {}),
     ...(input.activeStatus !== undefined ? { activeStatus: input.activeStatus } : {}),
     ...(input.contentLanguages !== undefined ? { contentLanguages: input.contentLanguages } : {}),
+    ...(input.publisherPlatforms !== undefined ? { publisherPlatforms: input.publisherPlatforms } : {}),
+    ...(input.searchType !== undefined ? { searchType: input.searchType } : {}),
   };
 }
 
