@@ -398,15 +398,17 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         const paginationPage = page;
         initialSignal = await action(() => paginationPage.evaluate(() => {
           window.scrollTo(0, document.body.scrollHeight);
-          const normalize = (value: string): string => value.replace(/[\s\u00a0]+/g, ' ').trim();
-          const isVisible = (element: Element): boolean => {
+          const button = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => {
             const node = element as HTMLElement;
             const style = window.getComputedStyle(node);
             const rect = node.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-          };
-          const isCreativeControl = (element: Element): boolean => Boolean(element.closest('[role="article"], [data-testid*="ad_archive_id"], [data-testid*="ad-card"], [data-testid*="ad_archive"]'));
-          const button = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => isVisible(element) && !isCreativeControl(element) && normalize(element.textContent ?? '') === 'Ver más') as HTMLElement | undefined;
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && rect.width > 0
+              && rect.height > 0
+              && !element.closest('[role="article"], [data-testid*="ad_archive_id"], [data-testid*="ad-card"], [data-testid*="ad_archive"]')
+              && (element.textContent ?? '').replace(/[\s\u00a0]+/g, ' ').trim() === 'Ver más';
+          }) as HTMLElement | undefined;
           button?.click();
           return Boolean(button);
         }));
