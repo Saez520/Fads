@@ -21,7 +21,16 @@ export interface NetworkEvidenceHop { url: string; status?: number; destination?
 export interface NetworkEvidenceSummary { evidenceId: string; logReference: string; responsePresent: boolean; status?: number; contentType?: string; url?: string; kind?: 'document' | 'network_failure'; failureText?: string; hops?: NetworkEvidenceHop[]; classification?: NetworkEvidenceClassification }
 export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string; evidenceId?: string; logReference?: string; responsePresent?: boolean; status?: number; contentType?: string; url?: string; networkEvidence?: NetworkEvidenceSummary[]; classifications?: NetworkEvidenceClassification[]; diagnosticIncomplete?: boolean }
 
-export interface ScrapeRequest { query: string; country: string; dateFrom: string; dateTo: string; adType: 'all' }
+export interface ScrapeRequest {
+  query: string;
+  country: string;
+  dateFrom: string;
+  dateTo: string;
+  adType: 'all';
+  mediaType?: 'image' | 'video' | 'all';
+  activeStatus?: 'active' | 'inactive' | 'all';
+  contentLanguages?: string[];
+}
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 
@@ -120,7 +129,7 @@ export function validateScrapeRequest(value: unknown): ScrapeRequest {
 export function validateStructuredRequest(value: unknown, context = 'solicitud'): ScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${context} inválida: debe ser un objeto.`);
   const input = value as Record<string, unknown>;
-  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType'];
+  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType', 'mediaType', 'activeStatus', 'contentLanguages'];
   if (Object.keys(input).some((key) => !expected.includes(key))) throw new Error(`${context} inválida: no se permiten campos desconocidos.`);
   if (typeof input.query !== 'string' || input.query.trim() === '') throw new Error('query debe ser un texto no vacío.');
   if (typeof input.country !== 'string' || !/^[A-Z]{2}$/.test(input.country)) throw new Error('country debe tener exactamente dos letras ASCII mayúsculas.');
@@ -128,7 +137,30 @@ export function validateStructuredRequest(value: unknown, context = 'solicitud')
   validateCalendarDate(input.dateTo, 'dateTo');
   if ((input.dateFrom as string) > (input.dateTo as string)) throw new Error('dateFrom no puede ser posterior a dateTo.');
   if (input.adType !== 'all') throw new Error("adType debe ser 'all'.");
-  return { query: input.query.trim(), country: input.country, dateFrom: input.dateFrom as string, dateTo: input.dateTo as string, adType: 'all' };
+  if (input.mediaType !== undefined && input.mediaType !== 'image' && input.mediaType !== 'video' && input.mediaType !== 'all') {
+    throw new Error("mediaType debe ser 'image', 'video' o 'all'.");
+  }
+  if (input.activeStatus !== undefined && input.activeStatus !== 'active' && input.activeStatus !== 'inactive' && input.activeStatus !== 'all') {
+    throw new Error("activeStatus debe ser 'active', 'inactive' o 'all'.");
+  }
+  if (input.contentLanguages !== undefined) {
+    if (!Array.isArray(input.contentLanguages)) throw new Error('contentLanguages debe ser un array de strings.');
+    input.contentLanguages.forEach((language, index) => {
+      if (typeof language !== 'string' || !/^[a-z]{2}$/.test(language)) {
+        throw new Error(`contentLanguages[${index}] debe ser un código de idioma de dos letras minúsculas (valor: ${String(language)}).`);
+      }
+    });
+  }
+  return {
+    query: input.query.trim(),
+    country: input.country,
+    dateFrom: input.dateFrom as string,
+    dateTo: input.dateTo as string,
+    adType: 'all',
+    ...(input.mediaType !== undefined ? { mediaType: input.mediaType } : {}),
+    ...(input.activeStatus !== undefined ? { activeStatus: input.activeStatus } : {}),
+    ...(input.contentLanguages !== undefined ? { contentLanguages: input.contentLanguages } : {}),
+  };
 }
 
 function validateCalendarDate(value: unknown, field: string): asserts value is string {

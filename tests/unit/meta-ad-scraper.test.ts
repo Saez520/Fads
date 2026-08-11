@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixtureAd, graphqlResponse, rateLimitResponse } from '../fixtures/graphql-response-fixture.js';
 import { scrapeMetaAds } from '../../src/scraper/meta-ad-scraper.js';
 import { ExecutionLogger } from '../../src/mcp/execution-logger.js';
-import { sanitizeExtractionError, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageRequest, type BrowserPageResponse } from '../../src/scraper/scraper-types.js';
+import { sanitizeExtractionError, validateScrapeRequest, type Browser, type BrowserContext, type BrowserLauncher, type BrowserPage, type BrowserPageRequest, type BrowserPageResponse } from '../../src/scraper/scraper-types.js';
 import { buildNetworkEvidence, classifyDiagnostic, effectiveBodyLimit, networkEvidenceSummary } from '../../src/scraper/network-evidence.js';
 
 type PageEvent = unknown | BrowserPageResponse | { requestFailed: BrowserPageRequest };
@@ -256,6 +256,32 @@ describe('Meta Ad scraper', () => {
     expect(url.searchParams.get('media_type')).toBe('all');
     expect(url.searchParams.get('search_type')).toBe('keyword_unordered');
     expect([...url.searchParams.keys()]).toEqual(['q', 'active_status', 'ad_type', 'country', 'is_targeted_country', 'media_type', 'search_type', 'start_date[min]', 'start_date[max]']);
+  });
+  it('serializes each optional filter and preserves language order', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'café & té', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', mediaType: 'image', activeStatus: 'active', contentLanguages: ['es', 'en'] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('media_type')).toBe('image');
+    expect(url.searchParams.get('active_status')).toBe('active');
+    expect(url.searchParams.get('content_languages[0]')).toBe('es');
+    expect(url.searchParams.get('content_languages[1]')).toBe('en');
+    expect(url.searchParams.get('q')).toBe('café & té');
+    expect([...url.searchParams.keys()]).toEqual(['q', 'active_status', 'ad_type', 'country', 'is_targeted_country', 'media_type', 'search_type', 'start_date[min]', 'start_date[max]', 'content_languages[0]', 'content_languages[1]']);
+  });
+  it('does not add language parameters for an empty list', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'empty', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', contentLanguages: [] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(new URL(page.gotoUrls[0]).searchParams.has('content_languages[0]')).toBe(false);
+  });
+  it.each([
+    ['mediaType', { mediaType: 'audio' }],
+    ['activeStatus', { activeStatus: 'paused' }],
+    ['contentLanguages', { contentLanguages: 'es' }],
+    ['contentLanguages[0]', { contentLanguages: ['ES'] }],
+    ['contentLanguages[0]', { contentLanguages: ['spa'] }],
+    ['contentLanguages[0]', { contentLanguages: [7] }],
+  ])('rejects invalid %s', (_field, extra) => {
+    expect(() => validateScrapeRequest({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', ...extra })).toThrow();
   });
   it('captures late GraphQL responses inside the injected window', async () => {
     vi.useFakeTimers();
