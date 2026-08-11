@@ -15,9 +15,10 @@ class InstrumentedPage implements BrowserPage {
   private requestFailedListener?: (request: BrowserPageRequest) => void | Promise<void>;
   readonly gotoUrls: string[] = [];
   evaluateCount = 0;
+  contentCount = 0;
   closeCount = 0;
   private responseIndex = 0;
-  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0, private readonly evaluateFailures = 0, private readonly responseDelaysMs: number[] = []) {}
+  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0, private readonly evaluateFailures = 0, private readonly responseDelaysMs: number[] = [], private readonly postRenderHtml = '') {}
   on(event: 'response' | 'requestfailed', listener: ((response: BrowserPageResponse) => void | Promise<void>) | ((request: BrowserPageRequest) => void | Promise<void>)): void {
     if (event === 'response') this.responseListener = listener as (response: BrowserPageResponse) => void | Promise<void>;
     else this.requestFailedListener = listener as (request: BrowserPageRequest) => void | Promise<void>;
@@ -34,6 +35,7 @@ class InstrumentedPage implements BrowserPage {
      this.scheduleResponse();
   }
   async evaluate(): Promise<void> { this.evaluateCount++; if (this.evaluateCount <= this.evaluateFailures) throw new Error('page unavailable'); this.emit(this.responses.shift() ?? []); }
+  async content(): Promise<string> { this.contentCount++; return this.postRenderHtml; }
   async close(): Promise<void> { this.closeCount++; }
   private scheduleResponse(): void {
     const delay = this.responseDelaysMs[this.responseIndex++] ?? this.responseDelayMs;
@@ -416,6 +418,13 @@ describe('Meta Ad scraper', () => {
     const result = await scrapeMetaAds({ query: 'ssr', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result).toMatchObject({ status: 'completa', stopReason: 'end_of_results', sourceCount: 1 });
     expect(page.evaluateCount).toBe(1);
+  });
+  it('captures post-render SSR content when navigation did not expose usable HTML', async () => {
+    const body = `<script>${JSON.stringify({ bootstrap: { search_results_connection: { edges: [{ node: { collated_results: [fixtureAd('post-render')] } }], page_info: { has_next_page: false } } } })}</script>`;
+    const page = new InstrumentedPage([[]], 0, undefined, 0, 0, 0, [], body);
+    const result = await scrapeMetaAds({ query: 'post-render', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(result.sourceCount).toBe(1);
+    expect(page.contentCount).toBe(1);
   });
   it('terminates explicitly for CAPTCHA or login documents', async () => {
     const page = new InstrumentedPage([[documentResponse('https://example.test/login', '<html>captcha required</html>')]]);

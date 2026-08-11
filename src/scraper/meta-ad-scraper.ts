@@ -137,6 +137,27 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       logger({ type: 'batch', query: request.query, sourceCount: sourceIds.size, count: records.length });
       if (latestIds > 0 && options.onBatch) await options.onBatch(records);
     };
+    const readPostRenderContent = async (): Promise<string | undefined> => {
+      const contentPage = page as unknown as { content?: () => Promise<string> };
+      if (typeof contentPage.content !== 'function') return undefined;
+      return contentPage.content();
+    };
+    const capturePostRenderSsr = async (): Promise<void> => {
+      try {
+        const html = await readPostRenderContent();
+        if (!html) return;
+        const parsed = parseSsrSearchResultsConnection(html);
+        if (!parsed.batch) return;
+        domSignals.ssrResults = parsed.batch.ads.length > 0;
+        hasNextPage = parsed.batch.hasNextPage;
+        recognizedResponses++;
+        await ingestBatch(parsed.batch);
+        captureSignal?.resolve('ssr_batch');
+      } catch (error) {
+        diagnosticIncomplete = true;
+        diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(errorMessage(error)) }, false);
+      }
+    };
     const collectResponse = async (response: BrowserPageResponse): Promise<void> => {
       try {
         const request = response.request?.();
@@ -267,11 +288,15 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.bootstrap}.failed`, phase: 'scroll', operation: 'bootstrap', outcome: 'failed', cause: sanitizeDiagnosticText(errorMessage(error)), durationMs: clock.now() - phaseStarted }, true);
       }
     };
+    const runInitialPostRender = async (): Promise<void> => {
+      await capturePostRenderSsr();
+      await runBootstrap();
+    };
     const initialStarted = clock.now();
     diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.started`, phase: 'navigation', operation: 'initial_goto', outcome: 'started' }, false);
     let initialSignal: import('./scraper-types.js').CaptureSignal;
     try {
-      initialSignal = await action(() => page ? page.goto(url) : Promise.reject(new Error('page unavailable')), initialDeadline, runBootstrap);
+      initialSignal = await action(() => page ? page.goto(url) : Promise.reject(new Error('page unavailable')), initialDeadline, runInitialPostRender);
       diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.completed`, phase: 'navigation', operation: 'initial_goto', outcome: 'succeeded', signal: initialSignal, durationMs: clock.now() - initialStarted }, false);
     } catch (error) {
       diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.failed`, phase: 'navigation', operation: 'initial_goto', outcome: 'failed', cause: page ? sanitizeDiagnosticText(errorMessage(error)) : 'page_unavailable', durationMs: clock.now() - initialStarted }, true);
@@ -335,9 +360,22 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         if (!page) throw new Error('page_unavailable');
         const paginationPage = page;
         initialSignal = await action(() => paginationPage.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
+        if (initialSignal === 'timeout' && !finalRateLimit && sourceIds.size < maxSourceAds) {
+          initialSignal = await action(() => paginationPage.evaluate(() => {
+            const normalize = (value: string): string => value.replace(/[\s\u00a0]+/g, ' ').trim();
+            const button = Array.from(document.querySelectorAll('button, [role="button"]')).find((element) => normalize(element.textContent ?? '') === 'Ver más') as HTMLElement | undefined;
+            button?.click();
+            return Boolean(button);
+          }));
+        }
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.completed`, phase: 'scroll', operation: 'pagination', outcome: 'succeeded', signal: initialSignal, durationMs: clock.now() - phaseStarted }, false);
       } catch (error) {
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.failed`, phase: 'scroll', operation: 'pagination', outcome: 'failed', cause: !page ? 'page_unavailable' : sanitizeDiagnosticText(errorMessage(error)), durationMs: clock.now() - phaseStarted }, true);
+        if (sourceIds.size > 0) {
+          status = 'incompleta';
+          stopReason = 'unrecognized_response';
+          break;
+        }
         throw error;
       }
       if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); break; }
@@ -439,8 +477,9 @@ async function readDiagnosticSignals(page: BrowserPage, fallback: DiagnosticDomS
   const realPage = realPageObject;
   const value = await realPage.evaluate(() => {
     const text = document.body?.innerText ?? '';
-    const resultCount = document.querySelectorAll('[role="article"], [data-testid*="ad_archive_id"]').length;
-    return { challenge: /challenge|unusual activity|blocked/i.test(text), captcha: /captcha/i.test(text), login: /log in|inicia sesión|iniciar sesión/i.test(text), ssrResults: resultCount > 0, explicitEmpty: /no results|sin resultados|no ads/i.test(text), shellWithoutResults: Boolean(document.body) && resultCount === 0, resultCount, connectionCount: document.querySelectorAll('[data-testid*="connection"], [role="article"]').length };
+    const resultCount = (text.match(/Identificador de la biblioteca/g) ?? []).length;
+    const hasCards = resultCount > 0;
+    return { challenge: /challenge|unusual activity|blocked/i.test(text), captcha: /captcha/i.test(text), login: !hasCards && /log in|inicia sesión|iniciar sesión/i.test(text), ssrResults: hasCards, explicitEmpty: /no results|sin resultados|no ads/i.test(text), shellWithoutResults: Boolean(document.body) && !hasCards, resultCount, connectionCount: resultCount };
   });
   return value && typeof value === 'object' ? { ...fallback, ...(value as Partial<DiagnosticDomSignals>) } : fallback;
 }
