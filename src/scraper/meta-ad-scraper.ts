@@ -143,21 +143,23 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       if (typeof contentPage.content !== 'function') return undefined;
       return contentPage.content();
     };
-    const capturePostRenderSsr = async (): Promise<void> => {
+    const capturePostRenderSsr = async (): Promise<boolean> => {
       try {
         const html = await readPostRenderContent();
-        if (!html) return;
+        if (!html) return false;
         const parsed = parseSsrSearchResultsConnection(html);
-        if (!parsed.batch) return;
+        if (!parsed.batch) return false;
         domSignals.ssrResults = parsed.batch.ads.length > 0;
         hasNextPage = parsed.batch.hasNextPage;
         recognizedResponses++;
         await ingestBatch(parsed.batch);
         if (loginTextDetected && sourceIds.size === 0) captureSignal?.resolve('captcha_or_login');
         else captureSignal?.resolve('ssr_batch');
+        return true;
       } catch (error) {
         diagnosticIncomplete = true;
         diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(errorMessage(error)) }, false);
+        return false;
       }
     };
     const collectResponse = async (response: BrowserPageResponse): Promise<void> => {
@@ -301,6 +303,27 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       if (loginTextDetected && sourceIds.size === 0) captureSignal?.resolve('captcha_or_login');
       await runBootstrap();
     };
+    const captureRecoveryPostRender = async (deadline: number, responseBaseline: number): Promise<void> => {
+      const pollLimit = Math.max(1, Math.ceil(captureTimeoutMs / 100));
+      for (let poll = 0; poll < pollLimit && clock.now() < deadline; poll++) {
+        if (await capturePostRenderSsr() || sourceIds.size > 0 || recognizedResponses > responseBaseline) return;
+        if (pending.some((task) => !task.settled)) return;
+        const remaining = Math.max(1, Math.min(100, deadline - clock.now()));
+        const before = clock.now();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timerPromise = new Promise<void>((resolve) => { timer = setTimeout(resolve, remaining); });
+        await Promise.race([captureSignal?.promise.then(() => undefined), timerPromise]);
+        if (timer !== undefined) clearTimeout(timer);
+        if (clock.now() === before) break;
+      }
+      if (page) {
+        try {
+          const observed = await readDiagnosticSignals(page, { ...domSignals, resultCount: records.length });
+          Object.assign(domSignals, observed);
+          if (observed.resultCount > 0) await capturePostRenderSsr();
+        } catch { diagnosticIncomplete = true; }
+      }
+    };
     const initialStarted = clock.now();
     diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.started`, phase: 'navigation', operation: 'initial_goto', outcome: 'started' }, false);
     let initialSignal: import('./scraper-types.js').CaptureSignal;
@@ -313,7 +336,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     }
     if (initialSignal === 'challenge_or_http_block') {
       await sleep(1500);
-      const recoveryDeadline = clock.now() + captureTimeoutMs;
+      let recoveryDeadline = clock.now() + captureTimeoutMs;
       // The first block is retained in evidence, but must not condemn a valid second load.
       httpBlock = false;
       domSignals.challenge = false;
@@ -325,6 +348,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         if (!page) throw new Error('page_unavailable');
         if (!page.reload) throw new Error('page.reload unavailable');
         await page.reload();
+        recoveryDeadline = clock.now() + captureTimeoutMs;
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_reload}.completed`, phase: 'navigation', operation: 'recovery_reload', outcome: 'succeeded', durationMs: clock.now() - phaseStarted }, false);
         recoveryStarted = true;
       } catch (error) {
@@ -334,6 +358,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_goto}.started`, phase: 'navigation', operation: 'recovery_goto', outcome: 'started' }, false);
           if (!page) throw new Error('page_unavailable');
           await page.goto(url);
+          recoveryDeadline = clock.now() + captureTimeoutMs;
           diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_goto}.completed`, phase: 'navigation', operation: 'recovery_goto', outcome: 'succeeded', durationMs: clock.now() - phaseStarted }, false);
           recoveryStarted = true;
         } catch (fallbackError) {
@@ -346,10 +371,13 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         }
       }
       if (recoveryStarted) {
+        const responseBaseline = recognizedResponses;
+        await captureRecoveryPostRender(recoveryDeadline, responseBaseline);
         await drainRecoveryPending(pending.splice(0), recoveryDeadline);
-        initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, recoveryDeadline - clock.now()));
-        await drainRecoveryPending(pending.splice(0), recoveryDeadline);
-        if (initialSignal === 'challenge_or_http_block') {
+        if (sourceIds.size === 0) await capturePostRenderSsr();
+        if (sourceIds.size > 0) initialSignal = 'ssr_batch';
+        else initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, recoveryDeadline - clock.now()));
+        if (initialSignal === 'challenge_or_http_block' && sourceIds.size === 0) {
           challengeRecoveryFailed = true;
           status = 'bloqueada';
           stopReason = 'unrecognized_response';
