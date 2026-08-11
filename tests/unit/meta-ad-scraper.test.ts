@@ -16,17 +16,24 @@ class InstrumentedPage implements BrowserPage {
   readonly gotoUrls: string[] = [];
   evaluateCount = 0;
   closeCount = 0;
-  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number) {}
+  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0) {}
   on(event: 'response' | 'requestfailed', listener: ((response: BrowserPageResponse) => void | Promise<void>) | ((request: BrowserPageRequest) => void | Promise<void>)): void {
     if (event === 'response') this.responseListener = listener as (response: BrowserPageResponse) => void | Promise<void>;
     else this.requestFailedListener = listener as (request: BrowserPageRequest) => void | Promise<void>;
   }
   async goto(url: string): Promise<void> {
-    this.gotoUrls.push(url); if (this.gotoUrls.length <= this.gotoFailures) throw new Error('temporary navigation error');
+    const isFallback = this.gotoUrls.length > 0;
+    this.gotoUrls.push(url); if (this.gotoUrls.length <= this.gotoFailures || (isFallback && this.fallbackGotoFailures > 0)) throw new Error('temporary navigation error');
     const emit = () => this.emit(this.responses.shift() ?? []);
     if (this.responseDelayMs === undefined) emit(); else setTimeout(emit, this.responseDelayMs);
   }
-  async reload(): Promise<void> { await this.goto(this.gotoUrls[this.gotoUrls.length - 1] ?? ''); }
+  async reload(): Promise<void> {
+    const url = this.gotoUrls[this.gotoUrls.length - 1] ?? '';
+    this.gotoUrls.push(url);
+    if (this.gotoUrls.length - 1 <= this.reloadFailures) throw new Error('reload aborted');
+    const emit = () => this.emit(this.responses.shift() ?? []);
+    if (this.responseDelayMs === undefined) emit(); else setTimeout(emit, this.responseDelayMs);
+  }
   async evaluate(): Promise<void> { this.evaluateCount++; this.emit(this.responses.shift() ?? []); }
   async close(): Promise<void> { this.closeCount++; }
   emit(payloads: unknown[]): void {
@@ -253,6 +260,27 @@ describe('Meta Ad scraper', () => {
     expect(result.sourceCount).toBe(1);
     expect(page.gotoUrls).toHaveLength(2);
     expect(waits).toContain(1500);
+  });
+  it('falls back to goto when reload aborts', async () => {
+    const page = new InstrumentedPage([
+      [documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)],
+      [graphqlResponse([fixtureAd('goto-recovered')], false)],
+    ], 0, undefined, 1);
+    const result = await scrapeMetaAds({ query: 'reload-fallback', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(result.sourceCount).toBe(1);
+    expect(page.gotoUrls).toHaveLength(3);
+  });
+  it('controls a failure of both recovery navigations without scraper.error', async () => {
+    const events: string[] = [];
+    const page = new InstrumentedPage([
+      [documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)],
+    ], 0, undefined, 1, 1);
+    const result = await scrapeMetaAds({ query: 'recovery-failure', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event.type + (event.type === 'blocked' ? `:${String(event.reason)}` : '')) });
+    expect(result).toMatchObject({ status: 'bloqueada', stopReason: 'unrecognized_response', extractionStatus: 'fallida', records: [] });
+    expect(result.diagnostic?.technicalDetail).toContain('challenge HTTP 403');
+    expect(events).toContain('blocked:challenge_recovery_failed');
+    expect(events).not.toContain('error');
+    expect(page.gotoUrls).toHaveLength(3);
   });
   it('stops after one reload when the document challenge persists', async () => {
     const page = new InstrumentedPage([

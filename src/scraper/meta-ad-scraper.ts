@@ -48,6 +48,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const domSignals: DiagnosticDomSignals = { challenge: false, captcha: false, login: false, ssrResults: false, explicitEmpty: false, shellWithoutResults: false, resultCount: 0, connectionCount: 0 };
   let networkFailure = false;
   let httpBlock = false;
+  let challengeRecoveryFailed = false;
   let diagnosticEventCount = 0;
   const diagnosticEvent = (event: Record<string, unknown>, reinforced = false): void => {
     diagnosticEventCount++;
@@ -218,11 +219,35 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       httpBlock = false;
       domSignals.challenge = false;
       captureSignal = createDeferred<import('./scraper-types.js').CaptureSignal>();
-      await (page!.reload ? page!.reload() : page!.goto(url));
-      await Promise.all(pending.splice(0));
-      initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, initialDeadline - clock.now()));
+      let recoveryStarted = false;
+      try {
+        if (!page!.reload) throw new Error('page.reload unavailable');
+        await page!.reload();
+        recoveryStarted = true;
+      } catch {
+        try {
+          await page!.goto(url);
+          recoveryStarted = true;
+        } catch {
+          challengeRecoveryFailed = true;
+          status = 'bloqueada';
+          stopReason = 'unrecognized_response';
+          initialSignal = 'challenge_or_http_block';
+          logger({ type: 'blocked', query: request.query, reason: 'challenge_recovery_failed' });
+        }
+      }
+      if (recoveryStarted) {
+        await Promise.all(pending.splice(0));
+        initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, initialDeadline - clock.now()));
+        if (initialSignal === 'challenge_or_http_block') {
+          challengeRecoveryFailed = true;
+          status = 'bloqueada';
+          stopReason = 'unrecognized_response';
+          logger({ type: 'blocked', query: request.query, reason: 'challenge_recovery_failed' });
+        }
+      }
     }
-    if (initialSignal === 'challenge_or_http_block') { status = 'bloqueada'; stopReason = 'unrecognized_response'; logger({ type: 'blocked', query: request.query, reason: 'challenge_or_http_block' }); }
+    if (initialSignal === 'challenge_or_http_block' && !challengeRecoveryFailed) { status = 'bloqueada'; stopReason = 'unrecognized_response'; logger({ type: 'blocked', query: request.query, reason: 'challenge_or_http_block' }); }
     if (initialSignal === 'http_error') { status = 'incompleta'; stopReason = 'error'; }
     if (initialSignal === 'captcha_or_login') { status = 'bloqueada'; stopReason = 'unrecognized_response'; }
     if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); }
@@ -295,7 +320,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   const diagnostic = primaryError !== undefined
     ? sanitizeExtractionError(primaryError, records.length > 0)
       : stopReason === 'unrecognized_response' || stopReason === 'empty_capture'
-         ? captureDiagnostic(request, records.length > 0, latestEvidence, networkEvidence, diagnosticIncomplete)
+         ? captureDiagnostic(request, records.length > 0, latestEvidence, networkEvidence, diagnosticIncomplete, challengeRecoveryFailed)
       : undefined;
   const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response' || stopReason === 'empty_capture', records.length), ...(diagnostic ? { diagnostic } : {}) };
   logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
@@ -344,13 +369,15 @@ async function readBrowserMetadata(page: BrowserPage, context: BrowserContext): 
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
-function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence?: NetworkEvidence, networkEvidence: NetworkEvidence[] = [], diagnosticIncomplete = false): ExtractionDiagnostic {
+function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence?: NetworkEvidence, networkEvidence: NetworkEvidence[] = [], diagnosticIncomplete = false, challengeRecoveryFailed = false): ExtractionDiagnostic {
   const alternativeSearchUrl = buildSearchUrl(request);
   return {
     userMessage: hasRecords
       ? 'La captura quedó inconclusa; se conservaron resultados parciales. Puede continuar con la búsqueda manual.'
       : 'La captura quedó inconclusa y no se recuperaron resultados interpretables. Puede continuar con la búsqueda manual.',
-    technicalDetail: 'Meta no devolvió una respuesta GraphQL interpretable durante la ventana de captura.',
+    technicalDetail: challengeRecoveryFailed
+      ? 'Meta respondió con un challenge HTTP 403 y la recuperación (reload/goto) no permitió continuar.'
+      : 'Meta no devolvió una respuesta GraphQL interpretable durante la ventana de captura.',
     alternativeSearchUrl,
     ...(evidence ? networkEvidenceSummary(evidence) : {}),
     ...(networkEvidence.length ? { networkEvidence: networkEvidence.map(networkEvidenceSummary), classifications: networkEvidence.map((item) => item.classification).filter((item): item is NonNullable<typeof item> => item !== undefined) } : {}),
