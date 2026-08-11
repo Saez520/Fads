@@ -15,6 +15,7 @@ const defaultClock: Clock = { now: () => performance.now() };
 const defaultRandom: Random = () => Math.random();
 const MAX_NETWORK_EVIDENCE_COUNT = 5;
 const MAX_NETWORK_EVIDENCE_BODY_BYTES = 160 * 1024;
+const PAGINATION_DEADLINE_MULTIPLIER = 20;
 
 export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number; extractionStatus: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -389,7 +390,9 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     if (initialSignal === 'http_error') { status = 'incompleta'; stopReason = 'error'; }
     if (initialSignal === 'captcha_or_login') { status = 'bloqueada'; stopReason = 'unrecognized_response'; }
     if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); }
-    while (!finalRateLimit && status !== 'bloqueada' && initialSignal !== 'timeout' && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0) {
+    const paginationDeadline = clock.now() + captureTimeoutMs * PAGINATION_DEADLINE_MULTIPLIER;
+    let paginationDeadlineReached = false;
+    while (!finalRateLimit && status !== 'bloqueada' && initialSignal !== 'timeout' && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0 && clock.now() < paginationDeadline) {
       const previousCount = sourceIds.size;
       const phaseStarted = clock.now();
       diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.started`, phase: 'scroll', operation: 'pagination', outcome: 'started' }, false);
@@ -411,7 +414,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           }) as HTMLElement | undefined;
           button?.click();
           return Boolean(button);
-        }));
+        }), paginationDeadline);
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.completed`, phase: 'scroll', operation: 'pagination', outcome: 'succeeded', signal: initialSignal, durationMs: clock.now() - phaseStarted }, false);
       } catch (error) {
         diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.failed`, phase: 'scroll', operation: 'pagination', outcome: 'failed', cause: !page ? 'page_unavailable' : sanitizeDiagnosticText(errorMessage(error)), durationMs: clock.now() - phaseStarted }, true);
@@ -423,11 +426,22 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         throw error;
       }
       if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); break; }
+      if (initialSignal === 'timeout' || clock.now() >= paginationDeadline) {
+        paginationDeadlineReached = true;
+        status = 'incompleta';
+        stopReason = 'unrecognized_response';
+        break;
+      }
       if (sourceIds.size >= maxSourceAds) { stopReason = 'ad_limit'; break; }
       if (sourceIds.size === previousCount || latestIds === 0) { stopReason = 'no_new_ads'; break; }
     }
-    if (!finalRateLimit && sourceIds.size >= maxSourceAds) stopReason = 'ad_limit';
-    if (!finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
+    if (!paginationDeadlineReached && clock.now() >= paginationDeadline && hasNextPage && sourceIds.size < maxSourceAds) {
+      paginationDeadlineReached = true;
+      status = 'incompleta';
+      stopReason = 'unrecognized_response';
+    }
+    if (!paginationDeadlineReached && !finalRateLimit && sourceIds.size >= maxSourceAds) stopReason = 'ad_limit';
+    if (!paginationDeadlineReached && !finalRateLimit && !hasNextPage) stopReason = 'end_of_results';
     if (!finalRateLimit && status !== 'bloqueada' && initialSignal !== 'http_error' && (recognizedResponses === 0 || discardedResponses > 0 || initialSignal === 'timeout')) {
       status = 'incompleta';
       stopReason = recognizedResponses === 0 && discardedResponses === 0 ? 'empty_capture' : 'unrecognized_response';
