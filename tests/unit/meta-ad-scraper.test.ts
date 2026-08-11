@@ -297,6 +297,29 @@ describe('Meta Ad scraper', () => {
     await scrapeMetaAds({ query: 'empty platforms', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', publisherPlatforms: [] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect([...new URL(page.gotoUrls[0]).searchParams.keys()].some((key) => key.startsWith('publisher_platforms['))).toBe(false);
   });
+  it('serializes page ids in input order', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'pages', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', pageIds: ['123', '456'] }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('page_ids[0]')).toBe('123');
+    expect(url.searchParams.get('page_ids[1]')).toBe('456');
+    expect(url.searchParams.has('view_all_page_id')).toBe(false);
+  });
+  it('builds a page catalog URL without an optional query', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', viewAllPageId: '123', searchType: 'keyword_exact_phrase' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('view_all_page_id')).toBe('123');
+    expect(url.searchParams.get('search_type')).toBe('page');
+    expect(url.searchParams.has('q')).toBe(false);
+  });
+  it('keeps a query in page catalog mode when provided', async () => {
+    const page = new InstrumentedPage([[{ data: { ad_library_main: { search_results_connection: { edges: [] } } } }]]);
+    await scrapeMetaAds({ query: 'pages', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', viewAllPageId: '123' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    const url = new URL(page.gotoUrls[0]);
+    expect(url.searchParams.get('q')).toBe('pages');
+    expect(url.searchParams.get('search_type')).toBe('page');
+  });
   it.each([
     ['mediaType', { mediaType: 'audio' }],
     ['activeStatus', { activeStatus: 'paused' }],
@@ -309,8 +332,17 @@ describe('Meta Ad scraper', () => {
     ['publisherPlatforms[0]', { publisherPlatforms: [7] }],
     ['searchType', { searchType: 'keyword_ordered' }],
     ['searchType', { searchType: 7 }],
+    ['pageIds', { pageIds: '123' }],
+    ['pageIds[0]', { pageIds: ['abc'] }],
+    ['pageIds[0]', { pageIds: [''] }],
+    ['viewAllPageId', { viewAllPageId: 'abc' }],
   ])('rejects invalid %s', (_field, extra) => {
     expect(() => validateScrapeRequest({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', ...extra })).toThrow();
+  });
+  it('rejects page filter combinations and missing keyword queries before navigation', () => {
+    expect(() => validateScrapeRequest({ country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' })).toThrow(/query/);
+    expect(() => validateScrapeRequest({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', pageIds: ['123'], viewAllPageId: '456' })).toThrow(/excluyentes/);
+    expect(validateScrapeRequest({ country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all', viewAllPageId: '456' }).query).toBe('');
   });
   it('captures late GraphQL responses inside the injected window', async () => {
     vi.useFakeTimers();

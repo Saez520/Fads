@@ -29,6 +29,7 @@ const phaseNames: Record<PhaseOperation, string> = {
 };
 
 export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScraperOptions = {}): Promise<ScraperResult> {
+  const query = request.query ?? '';
   const launcher = options.launcher ?? defaultLauncher;
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? defaultRandom;
@@ -61,14 +62,14 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
   let diagnosticEventCount = 0;
   const diagnosticEvent = (event: Record<string, unknown>, reinforced = false): void => {
     diagnosticEventCount++;
-    logger({ type: 'diagnostic', query: request.query, event: { ...event, priority: reinforced ? 'high' : 'low' } as never, reinforced });
+    logger({ type: 'diagnostic', query: query, event: { ...event, priority: reinforced ? 'high' : 'low' } as never, reinforced });
   };
-  logger({ type: 'start', query: request.query });
+  logger({ type: 'start', query: query });
   try {
     browser = await launcher.launch({ headless: true });
     context = await browser.newContext();
     page = await context.newPage();
-    logger({ type: 'browser', query: request.query, message: 'browser.ready' });
+    logger({ type: 'browser', query: query, message: 'browser.ready' });
     try {
       const metadata = await readBrowserMetadata(page, context);
       diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'browser', metadata }, false);
@@ -136,7 +137,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         sourceIds.add(ad.ad_archive_id); latestIds++;
         records.push(...normalizeAndFingerprintAd(ad));
       }
-      logger({ type: 'batch', query: request.query, sourceCount: sourceIds.size, count: records.length });
+      logger({ type: 'batch', query: query, sourceCount: sourceIds.size, count: records.length });
       if (latestIds > 0 && options.onBatch) await options.onBatch(records);
     };
     const readPostRenderContent = async (): Promise<string | undefined> => {
@@ -203,7 +204,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     };
     const publishNetworkEvidence = (reason: string, evidence: NetworkEvidence | NetworkEvidence[]): boolean => {
       try {
-        logger({ type: 'error', query: request.query, message: 'scraper.network_evidence', reason, evidence });
+        logger({ type: 'error', query: query, message: 'scraper.network_evidence', reason, evidence });
         return true;
       } catch {
         diagnosticIncomplete = true;
@@ -256,7 +257,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     });
     installRuntimeAdapters(page, (message) => diagnosticEvent(message, message.kind === 'pageerror'));
     const url = buildSearchUrl(request);
-    logger({ type: 'search', query: request.query, message: 'search.started' });
+    logger({ type: 'search', query: query, message: 'search.started' });
     let retryIndex = 0;
     const action = async (work: () => Promise<unknown>, deadline?: number, beforeSemanticCapture?: () => Promise<void>): Promise<import('./scraper-types.js').CaptureSignal> => {
       while (true) {
@@ -277,7 +278,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         catch (error) {
           const delay = await waitForRetry(sleep, retryIndex++);
           if (delay === null) { exhaustedRetries = true; status = 'incompleta'; stopReason = 'retries_exhausted'; throw error; }
-          logger({ type: 'retry', query: request.query, retry: retryIndex, delayMs: delay, error: errorMessage(error) });
+          logger({ type: 'retry', query: query, retry: retryIndex, delayMs: delay, error: errorMessage(error) });
         }
       }
     };
@@ -368,7 +369,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           status = 'bloqueada';
           stopReason = 'unrecognized_response';
           initialSignal = 'challenge_or_http_block';
-          logger({ type: 'blocked', query: request.query, reason: 'challenge_recovery_failed' });
+          logger({ type: 'blocked', query: query, reason: 'challenge_recovery_failed' });
         }
       }
       if (recoveryStarted) {
@@ -382,14 +383,14 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           challengeRecoveryFailed = true;
           status = 'bloqueada';
           stopReason = 'unrecognized_response';
-          logger({ type: 'blocked', query: request.query, reason: 'challenge_recovery_failed' });
+          logger({ type: 'blocked', query: query, reason: 'challenge_recovery_failed' });
         }
       }
     }
-    if (initialSignal === 'challenge_or_http_block' && !challengeRecoveryFailed) { status = 'bloqueada'; stopReason = 'unrecognized_response'; logger({ type: 'blocked', query: request.query, reason: 'challenge_or_http_block' }); }
+    if (initialSignal === 'challenge_or_http_block' && !challengeRecoveryFailed) { status = 'bloqueada'; stopReason = 'unrecognized_response'; logger({ type: 'blocked', query: query, reason: 'challenge_or_http_block' }); }
     if (initialSignal === 'http_error') { status = 'incompleta'; stopReason = 'error'; }
     if (initialSignal === 'captcha_or_login') { status = 'bloqueada'; stopReason = 'unrecognized_response'; }
-    if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); }
+    if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: query, reason: stopReason }); }
     const paginationDeadline = clock.now() + captureTimeoutMs * PAGINATION_DEADLINE_MULTIPLIER;
     let paginationDeadlineReached = false;
     while (!finalRateLimit && status !== 'bloqueada' && initialSignal !== 'timeout' && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0 && clock.now() < paginationDeadline) {
@@ -425,7 +426,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         }
         throw error;
       }
-      if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); break; }
+      if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: query, reason: stopReason }); break; }
       if (initialSignal === 'timeout' || clock.now() >= paginationDeadline) {
         paginationDeadlineReached = true;
         status = 'incompleta';
@@ -460,7 +461,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     }
   } catch (error) {
     primaryError = error;
-    logger({ type: 'error', query: request.query, message: 'scraper.error', error, stopReason });
+    logger({ type: 'error', query: query, message: 'scraper.error', error, stopReason });
     if (!exhaustedRetries) { status = 'incompleta'; stopReason = 'error'; }
     diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'pageerror', message: sanitizeDiagnosticText(errorMessage(error)) }, true);
   } finally {
@@ -496,7 +497,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     diagnosticEvent({ family: 'summary', type: 'diagnostic.summary', primary, secondary: [], signals: domSignals, durationMs: clock.now() - started, eventCount: diagnosticEventCount + 1, droppedEvents: diagnosticState?.droppedDiagnosticEvents ?? 0, diagnosticIncomplete: diagnosticIncomplete || Boolean(diagnosticState?.diagnosticIncomplete) || Boolean(trigger && options.diagnosticsEnabled === false) }, Boolean(trigger));
     for (const [name, resource] of [['page', page], ['context', context], ['browser', browser]] as const) {
       if (!resource) continue;
-      try { await resource.close(); } catch (error) { logger({ type: 'finish', query: request.query, cleanupError: `${name}: ${errorMessage(error)}` }); }
+      try { await resource.close(); } catch (error) { logger({ type: 'finish', query: query, cleanupError: `${name}: ${errorMessage(error)}` }); }
     }
   }
   const diagnostic = primaryError !== undefined
@@ -505,7 +506,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
          ? captureDiagnostic(request, records.length > 0, latestEvidence, networkEvidence, diagnosticIncomplete, challengeRecoveryFailed)
       : undefined;
   const result = { records, status, stopReason, sourceCount: sourceIds.size, extractionStatus: extractionStatusFor(primaryError !== undefined || stopReason === 'unrecognized_response' || stopReason === 'empty_capture', records.length), ...(diagnostic ? { diagnostic } : {}) };
-  logger({ type: 'finish', query: request.query, count: records.length, durationMs: clock.now() - started, status, stopReason });
+  logger({ type: 'finish', query: query, count: records.length, durationMs: clock.now() - started, status, stopReason });
   return result;
 }
 
@@ -570,11 +571,15 @@ function captureDiagnostic(request: ScrapeRequest, hasRecords: boolean, evidence
 
 function buildSearchUrl(request: ScrapeRequest): string {
   const params = new URLSearchParams();
-  params.set('q', request.query); params.set('active_status', request.activeStatus ?? 'all'); params.set('ad_type', request.adType); params.set('country', request.country);
-  params.set('is_targeted_country', 'false'); params.set('media_type', request.mediaType ?? 'all'); params.set('search_type', request.searchType ?? 'keyword_unordered');
+  if (request.query) params.set('q', request.query);
+  params.set('active_status', request.activeStatus ?? 'all'); params.set('ad_type', request.adType); params.set('country', request.country);
+  params.set('is_targeted_country', 'false'); params.set('media_type', request.mediaType ?? 'all');
+  params.set('search_type', request.viewAllPageId !== undefined ? 'page' : request.searchType ?? 'keyword_unordered');
   params.set('start_date[min]', request.dateFrom); params.set('start_date[max]', request.dateTo);
   request.contentLanguages?.forEach((language, index) => params.set(`content_languages[${index}]`, language));
   request.publisherPlatforms?.forEach((platform, index) => params.set(`publisher_platforms[${index}]`, platform));
+  request.pageIds?.forEach((pageId, index) => params.set(`page_ids[${index}]`, pageId));
+  if (request.viewAllPageId !== undefined) params.set('view_all_page_id', request.viewAllPageId);
   return `https://www.facebook.com/ads/library/?${params.toString()}`;
 }
 

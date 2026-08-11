@@ -22,7 +22,7 @@ export interface NetworkEvidenceSummary { evidenceId: string; logReference: stri
 export interface ExtractionDiagnostic { userMessage: string; technicalDetail: string; alternativeSearchUrl?: string; evidenceId?: string; logReference?: string; responsePresent?: boolean; status?: number; contentType?: string; url?: string; networkEvidence?: NetworkEvidenceSummary[]; classifications?: NetworkEvidenceClassification[]; diagnosticIncomplete?: boolean }
 
 export interface ScrapeRequest {
-  query: string;
+  query?: string;
   country: string;
   dateFrom: string;
   dateTo: string;
@@ -32,7 +32,10 @@ export interface ScrapeRequest {
   contentLanguages?: string[];
   publisherPlatforms?: string[];
   searchType?: 'keyword_unordered' | 'keyword_exact_phrase';
+  pageIds?: string[];
+  viewAllPageId?: string;
 }
+export type NormalizedScrapeRequest = Omit<ScrapeRequest, 'query'> & { query: string };
 export interface ScrapeSummary { query: string; count: number; status: ScrapeStatus; stopReason: StopReason; durationMs: number; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 export interface ScrapeEnvelope { query: string; records: NormalizedAdRecord[]; summary: ScrapeSummary; incomplete: boolean; extractionStatus?: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 
@@ -122,18 +125,26 @@ export interface GraphQlParseResult { batch?: ParsedBatch; errors: GraphQlError[
 export type SsrParseClassification = 'recognized' | 'empty' | 'incomplete' | 'absent';
 export interface SsrParseResult { batch?: ParsedBatch; classification: SsrParseClassification }
 
-export function validateScrapeRequest(value: unknown): ScrapeRequest {
+export function validateScrapeRequest(value: unknown): NormalizedScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid scrape request');
   const input = value as Record<string, unknown>;
   return validateStructuredRequest(input, 'scrape request');
 }
 
-export function validateStructuredRequest(value: unknown, context = 'solicitud'): ScrapeRequest {
+export function validateStructuredRequest(value: unknown, context = 'solicitud'): NormalizedScrapeRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${context} inválida: debe ser un objeto.`);
   const input = value as Record<string, unknown>;
-  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType', 'mediaType', 'activeStatus', 'contentLanguages', 'publisherPlatforms', 'searchType'];
+  const expected = ['query', 'country', 'dateFrom', 'dateTo', 'adType', 'mediaType', 'activeStatus', 'contentLanguages', 'publisherPlatforms', 'searchType', 'pageIds', 'viewAllPageId'];
   if (Object.keys(input).some((key) => !expected.includes(key))) throw new Error(`${context} inválida: no se permiten campos desconocidos.`);
-  if (typeof input.query !== 'string' || input.query.trim() === '') throw new Error('query debe ser un texto no vacío.');
+  const hasViewAllPageId = Object.prototype.hasOwnProperty.call(input, 'viewAllPageId');
+  const hasPageIds = Object.prototype.hasOwnProperty.call(input, 'pageIds');
+  if (hasViewAllPageId && hasPageIds) throw new Error('viewAllPageId y pageIds son filtros excluyentes; no se pueden usar juntos.');
+  if ((!hasViewAllPageId && typeof input.query !== 'string') || (!hasViewAllPageId && (input.query as string).trim() === '')) {
+    throw new Error('query debe ser un texto no vacío.');
+  }
+  if (hasViewAllPageId && (typeof input.viewAllPageId !== 'string' || !/^\d+$/.test(input.viewAllPageId))) {
+    throw new Error(`viewAllPageId debe ser un texto no vacío compuesto solo por dígitos (valor: ${String(input.viewAllPageId)}).`);
+  }
   if (typeof input.country !== 'string' || !/^[A-Z]{2}$/.test(input.country)) throw new Error('country debe tener exactamente dos letras ASCII mayúsculas.');
   validateCalendarDate(input.dateFrom, 'dateFrom');
   validateCalendarDate(input.dateTo, 'dateTo');
@@ -165,8 +176,16 @@ export function validateStructuredRequest(value: unknown, context = 'solicitud')
   if (input.searchType !== undefined && input.searchType !== 'keyword_unordered' && input.searchType !== 'keyword_exact_phrase') {
     throw new Error(`searchType no es válido (valor: ${String(input.searchType)}).`);
   }
+  if (input.pageIds !== undefined) {
+    if (!Array.isArray(input.pageIds)) throw new Error('pageIds debe ser un array de strings.');
+    input.pageIds.forEach((pageId, index) => {
+      if (typeof pageId !== 'string' || !/^\d+$/.test(pageId)) {
+        throw new Error(`pageIds[${index}] debe ser un texto compuesto solo por dígitos (valor: ${String(pageId)}).`);
+      }
+    });
+  }
   return {
-    query: input.query.trim(),
+    query: typeof input.query === 'string' ? input.query.trim() : '',
     country: input.country,
     dateFrom: input.dateFrom as string,
     dateTo: input.dateTo as string,
@@ -176,6 +195,8 @@ export function validateStructuredRequest(value: unknown, context = 'solicitud')
     ...(input.contentLanguages !== undefined ? { contentLanguages: input.contentLanguages } : {}),
     ...(input.publisherPlatforms !== undefined ? { publisherPlatforms: input.publisherPlatforms } : {}),
     ...(input.searchType !== undefined ? { searchType: input.searchType } : {}),
+    ...(input.pageIds !== undefined ? { pageIds: input.pageIds } : {}),
+    ...(hasViewAllPageId ? { viewAllPageId: input.viewAllPageId as string } : {}),
   };
 }
 

@@ -3,11 +3,11 @@ import { validateScrapeRequest } from './scraper-types.js';
 import { createScrapeEnvelope } from './scrape-output.js';
 import { AtomicJsonResultWriter } from './json-result-writer.js';
 import { scrapeMetaAds, type MetaAdScraperOptions } from './meta-ad-scraper.js';
-import { sanitizeExtractionError, type Clock, type Logger, type ResultWriter, type ScrapeEnvelope, type ScrapeRequest, type ScrapeSummary } from './scraper-types.js';
+import { sanitizeExtractionError, type Clock, type Logger, type ResultWriter, type ScrapeEnvelope, type NormalizedScrapeRequest, type ScrapeSummary } from './scraper-types.js';
 
 export interface ScrapeRunnerOptions extends MetaAdScraperOptions { outputPath?: string; writer?: ResultWriter }
 export async function runScrape(input: unknown, options: ScrapeRunnerOptions = {}): Promise<ScrapeEnvelope> {
-  const request: ScrapeRequest = validateScrapeRequest(input);
+  const request: NormalizedScrapeRequest = validateScrapeRequest(input);
   const writer = options.writer ?? (options.outputPath ? new AtomicJsonResultWriter(options.outputPath) : undefined);
   const diagnosticState = options.diagnosticState ?? options.logger?.diagnosticState;
   const clock: Clock = options.clock ?? { now: () => performance.now() };
