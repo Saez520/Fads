@@ -16,7 +16,8 @@ class InstrumentedPage implements BrowserPage {
   readonly gotoUrls: string[] = [];
   evaluateCount = 0;
   closeCount = 0;
-  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0) {}
+  private responseIndex = 0;
+  constructor(private readonly responses: PageEvent[][], private readonly gotoFailures = 0, private readonly responseDelayMs?: number, private readonly reloadFailures = 0, private readonly fallbackGotoFailures = 0, private readonly evaluateFailures = 0, private readonly responseDelaysMs: number[] = []) {}
   on(event: 'response' | 'requestfailed', listener: ((response: BrowserPageResponse) => void | Promise<void>) | ((request: BrowserPageRequest) => void | Promise<void>)): void {
     if (event === 'response') this.responseListener = listener as (response: BrowserPageResponse) => void | Promise<void>;
     else this.requestFailedListener = listener as (request: BrowserPageRequest) => void | Promise<void>;
@@ -24,18 +25,21 @@ class InstrumentedPage implements BrowserPage {
   async goto(url: string): Promise<void> {
     const isFallback = this.gotoUrls.length > 0;
     this.gotoUrls.push(url); if (this.gotoUrls.length <= this.gotoFailures || (isFallback && this.fallbackGotoFailures > 0)) throw new Error('temporary navigation error');
-    const emit = () => this.emit(this.responses.shift() ?? []);
-    if (this.responseDelayMs === undefined) emit(); else setTimeout(emit, this.responseDelayMs);
+     this.scheduleResponse();
   }
   async reload(): Promise<void> {
     const url = this.gotoUrls[this.gotoUrls.length - 1] ?? '';
     this.gotoUrls.push(url);
     if (this.gotoUrls.length - 1 <= this.reloadFailures) throw new Error('reload aborted');
-    const emit = () => this.emit(this.responses.shift() ?? []);
-    if (this.responseDelayMs === undefined) emit(); else setTimeout(emit, this.responseDelayMs);
+     this.scheduleResponse();
   }
-  async evaluate(): Promise<void> { this.evaluateCount++; this.emit(this.responses.shift() ?? []); }
+  async evaluate(): Promise<void> { this.evaluateCount++; if (this.evaluateCount <= this.evaluateFailures) throw new Error('page unavailable'); this.emit(this.responses.shift() ?? []); }
   async close(): Promise<void> { this.closeCount++; }
+  private scheduleResponse(): void {
+    const delay = this.responseDelaysMs[this.responseIndex++] ?? this.responseDelayMs;
+    const emit = () => this.emit(this.responses.shift() ?? []);
+    if (delay === undefined) emit(); else setTimeout(emit, delay);
+  }
   emit(payloads: unknown[]): void {
     for (const payload of payloads) {
       if (isResponse(payload)) { this.responseListener?.(payload); continue; }
@@ -250,8 +254,33 @@ describe('Meta Ad scraper', () => {
     await vi.advanceTimersByTimeAsync(25);
     const result = await scraping;
     expect(result.sourceCount).toBe(1); expect(result.stopReason).toBe('end_of_results');
-    expect(page.gotoUrls).toHaveLength(1); expect(page.gotoUrls[0]).toContain('q=diabetes'); expect(page.evaluateCount).toBe(0);
+    expect(page.gotoUrls).toHaveLength(1); expect(page.gotoUrls[0]).toContain('q=diabetes'); expect(page.evaluateCount).toBe(1);
     expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
+  });
+  it('runs one bootstrap scroll even when navigation has no prior ads', async () => {
+    const page = new InstrumentedPage([[], [graphqlResponse([fixtureAd('bootstrap')], false)]]);
+    const result = await scrapeMetaAds({ query: 'bootstrap', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
+    expect(result.sourceCount).toBe(1);
+    expect(page.evaluateCount).toBe(1);
+  });
+  it('emits structured telemetry for navigation and bootstrap phases', async () => {
+    const events: unknown[] = [];
+    const page = new InstrumentedPage([[], [graphqlResponse([fixtureAd('telemetry')], false)]]);
+    await scrapeMetaAds({ query: 'telemetry', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event) });
+    const names = events.flatMap((event) => {
+      if (typeof event !== 'object' || event === null || !('event' in event)) return [];
+      const nested = (event as { event?: { name?: unknown } }).event;
+      return typeof nested?.name === 'string' ? [nested.name] : [];
+    });
+    expect(names).toEqual(expect.arrayContaining(['scraper.nav.goto.started', 'scraper.nav.goto.completed', 'scraper.scroll.bootstrap.started', 'scraper.scroll.bootstrap.completed']));
+  });
+  it('records a failed bootstrap without propagating the evaluate error', async () => {
+    const events: unknown[] = [];
+    const page = new InstrumentedPage([[]], 0, undefined, 0, 0, 1);
+    const result = await scrapeMetaAds({ query: 'bootstrap-failure', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, captureTimeoutMs: 1, logger: (event) => events.push(event) });
+    const failed = events.find((event) => typeof event === 'object' && event !== null && 'event' in event && (event as { event?: { name?: string } }).event?.name === 'scraper.scroll.bootstrap.failed') as { event?: { cause?: string } } | undefined;
+    expect(failed?.event?.cause).toBe('page unavailable');
+    expect(result.stopReason).toBe('empty_capture');
   });
   it('recovers a transient document block with one reload in the same page', async () => {
     const page = new InstrumentedPage([[documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)], [graphqlResponse([fixtureAd('reloaded')], false)]]);
@@ -260,6 +289,35 @@ describe('Meta Ad scraper', () => {
     expect(result.sourceCount).toBe(1);
     expect(page.gotoUrls).toHaveLength(2);
     expect(waits).toContain(1500);
+  });
+  it('uses a fresh recovery deadline after throttle and recovery pause', async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const waits: number[] = [];
+    const page = new InstrumentedPage([
+      [documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)],
+      [graphqlResponse([fixtureAd('late-recovery')], false)],
+    ], 0, undefined, 0, 0, 0, [0, 40]);
+    const scraping = scrapeMetaAds({ query: 'recovery-deadline', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, {
+      launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }),
+      clock: { now: () => now },
+      sleep: async (ms) => { waits.push(ms); now += ms; },
+      random: () => 0,
+      captureTimeoutMs: 100,
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    const result = await scraping;
+    expect(waits).toEqual(expect.arrayContaining([8000, 1500]));
+    expect(now).toBeGreaterThan(100);
+    expect(result.sourceCount).toBe(1);
+    expect(result.stopReason).toBe('end_of_results');
+  });
+  it('emits recovery reload and fallback goto telemetry', async () => {
+    const events: unknown[] = [];
+    const page = new InstrumentedPage([[documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)], [graphqlResponse([fixtureAd('telemetry-recovery')], false)]], 0, undefined, 1);
+    await scrapeMetaAds({ query: 'recovery-telemetry', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event) });
+    const names = events.flatMap((event) => typeof event === 'object' && event !== null && 'event' in event && typeof (event as { event?: { name?: unknown } }).event?.name === 'string' ? [(event as { event: { name: string } }).event.name] : []);
+    expect(names).toEqual(expect.arrayContaining(['scraper.recovery.reload.started', 'scraper.recovery.reload.failed', 'scraper.recovery.goto.started', 'scraper.recovery.goto.completed']));
   });
   it('falls back to goto when reload aborts', async () => {
     const page = new InstrumentedPage([
@@ -297,7 +355,7 @@ describe('Meta Ad scraper', () => {
     const page = new InstrumentedPage([[documentResponse('https://example.test/ads', body)]]);
     const result = await scrapeMetaAds({ query: 'ssr', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result).toMatchObject({ status: 'completa', stopReason: 'end_of_results', sourceCount: 1 });
-    expect(page.evaluateCount).toBe(0);
+    expect(page.evaluateCount).toBe(1);
   });
   it('terminates explicitly for CAPTCHA or login documents', async () => {
     const page = new InstrumentedPage([[documentResponse('https://example.test/login', '<html>captcha required</html>')]]);
@@ -334,15 +392,18 @@ describe('Meta Ad scraper', () => {
     expect(result.sourceCount).toBe(0); expect(page.closeCount).toBe(1); expect(counters.contextClose).toBe(1); expect(counters.browserClose).toBe(1);
   });
   it('stops on no-new, without an extra scroll', async () => {
-    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [graphqlResponse([fixtureAd('1')], true)]]);
-    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
-    expect(result.stopReason).toBe('no_new_ads'); expect(page.evaluateCount).toBe(1);
+    const events: unknown[] = [];
+    const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [graphqlResponse([fixtureAd('1')], true)], [graphqlResponse([fixtureAd('1')], true)]]);
+    const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0, logger: (event) => events.push(event) });
+    expect(result.stopReason).toBe('no_new_ads'); expect(page.evaluateCount).toBe(2);
+    const names = events.flatMap((event) => typeof event === 'object' && event !== null && 'event' in event && typeof (event as { event?: { name?: unknown } }).event?.name === 'string' ? [(event as { event: { name: string } }).event.name] : []);
+    expect(names).toEqual(expect.arrayContaining(['scraper.scroll.pagination.started', 'scraper.scroll.pagination.completed']));
   });
   it('cuts at 1,500 source ads and does not scroll', async () => {
     const ads = Array.from({ length: 1501 }, (_, index) => fixtureAd(String(index)));
     const page = new InstrumentedPage([[graphqlResponse(ads, true)]]);
     const result = await scrapeMetaAds({ query: 'x', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
-    expect(result.sourceCount).toBe(1500); expect(result.stopReason).toBe('ad_limit'); expect(page.evaluateCount).toBe(0);
+    expect(result.sourceCount).toBe(1500); expect(result.stopReason).toBe('ad_limit'); expect(page.evaluateCount).toBe(1);
   });
   it('retains partial records and stops on final rate limit', async () => {
     const page = new InstrumentedPage([[graphqlResponse([fixtureAd('1')], true)], [rateLimitResponse]]);

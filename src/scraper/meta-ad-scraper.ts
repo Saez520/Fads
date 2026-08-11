@@ -18,6 +18,14 @@ const MAX_NETWORK_EVIDENCE_BODY_BYTES = 160 * 1024;
 
 export interface ScraperResult { records: NormalizedAdRecord[]; status: ScrapeStatus; stopReason: StopReason; sourceCount: number; extractionStatus: ExtractionStatus; diagnostic?: ExtractionDiagnostic }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+type PhaseOperation = 'initial_goto' | 'recovery_reload' | 'recovery_goto' | 'bootstrap' | 'pagination';
+const phaseNames: Record<PhaseOperation, string> = {
+  initial_goto: 'scraper.nav.goto',
+  recovery_reload: 'scraper.recovery.reload',
+  recovery_goto: 'scraper.recovery.goto',
+  bootstrap: 'scraper.scroll.bootstrap',
+  pagination: 'scraper.scroll.pagination',
+};
 
 export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScraperOptions = {}): Promise<ScraperResult> {
   const launcher = options.launcher ?? defaultLauncher;
@@ -192,7 +200,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     const url = buildSearchUrl(request);
     logger({ type: 'search', query: request.query, message: 'search.started' });
     let retryIndex = 0;
-    const action = async (work: () => Promise<unknown>, deadline?: number): Promise<import('./scraper-types.js').CaptureSignal> => {
+    const action = async (work: () => Promise<unknown>, deadline?: number, beforeSemanticCapture?: () => Promise<void>): Promise<import('./scraper-types.js').CaptureSignal> => {
       while (true) {
         try {
           latestIds = 0;
@@ -200,6 +208,10 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           await waitForThrottle(sleep, random);
           await work();
           await Promise.all(pending.splice(0));
+          if (beforeSemanticCapture) {
+            await beforeSemanticCapture();
+            await Promise.all(pending.splice(0));
+          }
           const signal = await waitForSemanticCapture(captureSignal.promise, deadline === undefined ? captureTimeoutMs : Math.max(0, deadline - clock.now()));
           await Promise.all(pending.splice(0));
           return signal;
@@ -212,23 +224,60 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       }
     };
     const initialDeadline = clock.now() + captureTimeoutMs;
-    let initialSignal = await action(() => page!.goto(url), initialDeadline);
+    let bootstrapAttempted = false;
+    const runBootstrap = async (): Promise<void> => {
+      if (bootstrapAttempted || domSignals.challenge || domSignals.captcha || domSignals.login || httpBlock || finalRateLimit) return;
+      bootstrapAttempted = true;
+      const phaseStarted = clock.now();
+      diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.bootstrap}.started`, phase: 'scroll', operation: 'bootstrap', outcome: 'started' }, false);
+      if (!page) {
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.bootstrap}.failed`, phase: 'scroll', operation: 'bootstrap', outcome: 'failed', cause: 'page_unavailable', durationMs: clock.now() - phaseStarted }, true);
+        return;
+      }
+      try {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.bootstrap}.completed`, phase: 'scroll', operation: 'bootstrap', outcome: 'succeeded', durationMs: clock.now() - phaseStarted }, false);
+      } catch (error) {
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.bootstrap}.failed`, phase: 'scroll', operation: 'bootstrap', outcome: 'failed', cause: sanitizeDiagnosticText(errorMessage(error)), durationMs: clock.now() - phaseStarted }, true);
+      }
+    };
+    const initialStarted = clock.now();
+    diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.started`, phase: 'navigation', operation: 'initial_goto', outcome: 'started' }, false);
+    let initialSignal: import('./scraper-types.js').CaptureSignal;
+    try {
+      initialSignal = await action(() => page ? page.goto(url) : Promise.reject(new Error('page unavailable')), initialDeadline, runBootstrap);
+      diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.completed`, phase: 'navigation', operation: 'initial_goto', outcome: 'succeeded', signal: initialSignal, durationMs: clock.now() - initialStarted }, false);
+    } catch (error) {
+      diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.initial_goto}.failed`, phase: 'navigation', operation: 'initial_goto', outcome: 'failed', cause: page ? sanitizeDiagnosticText(errorMessage(error)) : 'page_unavailable', durationMs: clock.now() - initialStarted }, true);
+      throw error;
+    }
     if (initialSignal === 'challenge_or_http_block') {
       await sleep(1500);
+      const recoveryDeadline = clock.now() + captureTimeoutMs;
       // The first block is retained in evidence, but must not condemn a valid second load.
       httpBlock = false;
       domSignals.challenge = false;
       captureSignal = createDeferred<import('./scraper-types.js').CaptureSignal>();
       let recoveryStarted = false;
       try {
-        if (!page!.reload) throw new Error('page.reload unavailable');
-        await page!.reload();
+        const phaseStarted = clock.now();
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_reload}.started`, phase: 'navigation', operation: 'recovery_reload', outcome: 'started' }, false);
+        if (!page) throw new Error('page_unavailable');
+        if (!page.reload) throw new Error('page.reload unavailable');
+        await page.reload();
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_reload}.completed`, phase: 'navigation', operation: 'recovery_reload', outcome: 'succeeded', durationMs: clock.now() - phaseStarted }, false);
         recoveryStarted = true;
-      } catch {
+      } catch (error) {
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_reload}.failed`, phase: 'navigation', operation: 'recovery_reload', outcome: 'failed', cause: !page ? 'page_unavailable' : sanitizeDiagnosticText(errorMessage(error)), durationMs: 0 }, true);
         try {
-          await page!.goto(url);
+          const phaseStarted = clock.now();
+          diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_goto}.started`, phase: 'navigation', operation: 'recovery_goto', outcome: 'started' }, false);
+          if (!page) throw new Error('page_unavailable');
+          await page.goto(url);
+          diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_goto}.completed`, phase: 'navigation', operation: 'recovery_goto', outcome: 'succeeded', durationMs: clock.now() - phaseStarted }, false);
           recoveryStarted = true;
-        } catch {
+        } catch (fallbackError) {
+          diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.recovery_goto}.failed`, phase: 'navigation', operation: 'recovery_goto', outcome: 'failed', cause: !page ? 'page_unavailable' : sanitizeDiagnosticText(errorMessage(fallbackError)), durationMs: 0 }, true);
           challengeRecoveryFailed = true;
           status = 'bloqueada';
           stopReason = 'unrecognized_response';
@@ -238,7 +287,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       }
       if (recoveryStarted) {
         await Promise.all(pending.splice(0));
-        initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, initialDeadline - clock.now()));
+        initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, recoveryDeadline - clock.now()));
         if (initialSignal === 'challenge_or_http_block') {
           challengeRecoveryFailed = true;
           status = 'bloqueada';
@@ -253,7 +302,17 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); }
     while (!finalRateLimit && status !== 'bloqueada' && initialSignal !== 'timeout' && hasNextPage && sourceIds.size < maxSourceAds && latestIds > 0) {
       const previousCount = sourceIds.size;
-      initialSignal = await action(() => page!.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
+      const phaseStarted = clock.now();
+      diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.started`, phase: 'scroll', operation: 'pagination', outcome: 'started' }, false);
+      try {
+        if (!page) throw new Error('page_unavailable');
+        const paginationPage = page;
+        initialSignal = await action(() => paginationPage.evaluate(() => window.scrollTo(0, document.body.scrollHeight)));
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.completed`, phase: 'scroll', operation: 'pagination', outcome: 'succeeded', signal: initialSignal, durationMs: clock.now() - phaseStarted }, false);
+      } catch (error) {
+        diagnosticEvent({ family: 'navigation', type: 'diagnostic.navigation', name: `${phaseNames.pagination}.failed`, phase: 'scroll', operation: 'pagination', outcome: 'failed', cause: !page ? 'page_unavailable' : sanitizeDiagnosticText(errorMessage(error)), durationMs: clock.now() - phaseStarted }, true);
+        throw error;
+      }
       if (finalRateLimit) { status = 'bloqueada'; stopReason = 'rate_limit'; logger({ type: 'blocked', query: request.query, reason: stopReason }); break; }
       if (sourceIds.size >= maxSourceAds) { stopReason = 'ad_limit'; break; }
       if (sourceIds.size === previousCount || latestIds === 0) { stopReason = 'no_new_ads'; break; }
