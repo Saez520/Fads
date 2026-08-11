@@ -69,6 +69,15 @@ function documentResponseWithRequest(url: string, body: string, request: Browser
   request.response = async () => response;
   return response;
 }
+function delayedGraphQlResponse(url: string, payload: unknown, delayMs: number): BrowserPageResponse {
+  return {
+    url: () => url,
+    json: async () => { await new Promise<void>((resolve) => setTimeout(resolve, delayMs)); return payload; },
+    text: async () => JSON.stringify(payload),
+    status: () => 200,
+    headers: () => ({ 'content-type': 'application/json' }),
+  };
+}
 function fakeLauncher(page: InstrumentedPage, counters: { contextClose: number; browserClose: number }): BrowserLauncher {
   const context: BrowserContext = { newPage: async () => page, close: async () => { counters.contextClose++; } };
   const browser: Browser = { newContext: async () => context, close: async () => { counters.browserClose++; } };
@@ -327,6 +336,57 @@ describe('Meta Ad scraper', () => {
     const result = await scrapeMetaAds({ query: 'reload-fallback', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, { launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }), sleep: noWait, random: () => 0 });
     expect(result.sourceCount).toBe(1);
     expect(page.gotoUrls).toHaveLength(3);
+  });
+  it('drains recovery requests that settle before the recovery deadline', async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const events: unknown[] = [];
+    const url = 'https://www.facebook.com/api/graphql/?recovery=on-time';
+    const page = new InstrumentedPage([
+      [documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)],
+      [delayedGraphQlResponse(url, graphqlResponse([fixtureAd('on-time')]), 20)],
+    ]);
+    const scraping = scrapeMetaAds({ query: 'recovery-on-time', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, {
+      launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }),
+      clock: { now: () => now },
+      sleep: async (ms) => { now += ms; },
+      random: () => 0,
+      captureTimeoutMs: 100,
+      logger: (event) => events.push(event),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20);
+    const result = await scraping;
+    const abandoned = events.filter((event) => typeof event === 'object' && event !== null && 'event' in event && (event as { event?: { timestamp?: unknown } }).event?.timestamp);
+    expect(result.sourceCount).toBe(1);
+    expect(abandoned).toHaveLength(0);
+  });
+  it('abandons each late recovery request at the deadline without blocking cleanup', async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    const events: unknown[] = [];
+    const url = 'https://www.facebook.com/api/graphql/?recovery=late';
+    const page = new InstrumentedPage([
+      [documentResponse('https://example.test/rd_challenge', '<html>rd_challenge</html>', 403)],
+      [delayedGraphQlResponse(url, graphqlResponse([fixtureAd('late')]), 200)],
+    ]);
+    const scraping = scrapeMetaAds({ query: 'recovery-late', country: 'CO', dateFrom: '2026-05-07', dateTo: '2026-08-07', adType: 'all' }, {
+      launcher: fakeLauncher(page, { contextClose: 0, browserClose: 0 }),
+      clock: { now: () => now },
+      sleep: async (ms) => { now += ms; },
+      random: () => 0,
+      captureTimeoutMs: 100,
+      logger: (event) => events.push(event),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(100);
+    const result = await scraping;
+    const abandoned = events.filter((event) => typeof event === 'object' && event !== null && 'event' in event && (event as { event?: { timestamp?: unknown } }).event?.timestamp) as Array<{ event: { url?: string; timestamp?: string } }>;
+    expect(result.stopReason).toBe('end_of_results');
+    expect(page.closeCount).toBe(1);
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0].event).toMatchObject({ url, timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
   });
   it('controls a failure of both recovery navigations without scraper.error', async () => {
     const events: string[] = [];

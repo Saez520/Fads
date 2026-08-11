@@ -72,7 +72,33 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
       const metadata = await readBrowserMetadata(page, context);
       diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'browser', metadata }, false);
     } catch { diagnosticIncomplete = true; }
-    const pending: Promise<void>[] = [];
+    type PendingTask = { promise: Promise<void>; url?: string; settled: boolean };
+    const pending: PendingTask[] = [];
+    const registerPending = (promise: Promise<void>, url?: string): PendingTask => {
+      const task: PendingTask = { promise, url, settled: false };
+      task.promise = promise.finally(() => { task.settled = true; });
+      pending.push(task);
+      return task;
+    };
+    const drainRecoveryPending = async (batch: PendingTask[], recoveryDeadline: number): Promise<void> => {
+      if (batch.length === 0 || batch.every((task) => task.settled)) return;
+      const all = Promise.all(batch.map((task) => task.promise));
+      void all.catch(() => undefined);
+      const remainingMs = Math.max(0, recoveryDeadline - clock.now());
+      if (remainingMs > 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), remainingMs); });
+        const outcome = await Promise.race([all.then(() => 'settled' as const), timeout]);
+        if (timer !== undefined) clearTimeout(timer);
+        if (outcome === 'settled') return;
+      }
+      const timestamp = new Date().toISOString();
+      for (const task of batch) {
+        if (!task.settled && task.url) {
+          diagnosticEvent({ family: 'runtime', type: 'diagnostic.runtime', kind: 'requestfailed', url: task.url, timestamp });
+        }
+      }
+    };
     let finalRateLimit = false;
     let recognizedResponses = 0;
     let discardedResponses = 0;
@@ -154,7 +180,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
     };
     page.on('response', (response) => {
       if (!isGraphQlUrl(response.url()) && !isGraphQlEndpoint(response.url())) {
-        const task = collectResponse(response); pending.push(task); return;
+        registerPending(collectResponse(response), response.url()); return;
       }
       const emitEvidence = async (reason: string, error?: unknown): Promise<void> => {
         let body: string | undefined;
@@ -182,7 +208,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         responseReadError = error;
         await emitEvidence('response_read_error', error);
       });
-      pending.push(task);
+      registerPending(task, response.url());
     });
     page.on('requestfailed', (request: BrowserPageRequest) => {
       const task = (async () => {
@@ -194,7 +220,7 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           await collect(buildNetworkEvidence({ responsePresent: false, url: request.url(), failureText, kind: 'network_failure' }));
         } catch { diagnosticIncomplete = true; }
       })();
-      pending.push(task);
+      registerPending(task, request.url());
     });
     installRuntimeAdapters(page, (message) => diagnosticEvent(message, message.kind === 'pageerror'));
     const url = buildSearchUrl(request);
@@ -207,13 +233,13 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
           captureSignal = createDeferred<import('./scraper-types.js').CaptureSignal>();
           await waitForThrottle(sleep, random);
           await work();
-          await Promise.all(pending.splice(0));
+          await Promise.all(pending.splice(0).map((task) => task.promise));
           if (beforeSemanticCapture) {
             await beforeSemanticCapture();
-            await Promise.all(pending.splice(0));
+            await Promise.all(pending.splice(0).map((task) => task.promise));
           }
           const signal = await waitForSemanticCapture(captureSignal.promise, deadline === undefined ? captureTimeoutMs : Math.max(0, deadline - clock.now()));
-          await Promise.all(pending.splice(0));
+          await Promise.all(pending.splice(0).map((task) => task.promise));
           return signal;
         }
         catch (error) {
@@ -286,8 +312,9 @@ export async function scrapeMetaAds(request: ScrapeRequest, options: MetaAdScrap
         }
       }
       if (recoveryStarted) {
-        await Promise.all(pending.splice(0));
+        await drainRecoveryPending(pending.splice(0), recoveryDeadline);
         initialSignal = await waitForSemanticCapture(captureSignal.promise, Math.max(0, recoveryDeadline - clock.now()));
+        await drainRecoveryPending(pending.splice(0), recoveryDeadline);
         if (initialSignal === 'challenge_or_http_block') {
           challengeRecoveryFailed = true;
           status = 'bloqueada';
