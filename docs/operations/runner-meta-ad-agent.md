@@ -1,6 +1,6 @@
 # Instrucciones para Runner — Implementación Meta Ad Agent
 
-Este documento no es el roadmap de producto (ver `Roadmap_MVP_Meta_Ad_Agent.md`). Es la traducción de ese roadmap en unidades de trabajo ordenadas para que el runner las procese una por una: cada unidad entra al flujo normal (ca-writer → planner → constructor → validator).
+Este documento no es el roadmap de producto (ver `../product/meta-ad-agent-mvp-roadmap.md`). Es la traducción de ese roadmap en unidades de trabajo ordenadas para que el runner las procese una por una: cada unidad entra al flujo normal (ca-writer → planner → constructor → validator).
 
 ## Cómo usar este documento
 

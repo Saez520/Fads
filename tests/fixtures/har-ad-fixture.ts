@@ -13,7 +13,7 @@ interface HarRoot {
 }
 
 export function loadHarAds(): AdInput[] {
-  const harPath = fileURLToPath(new URL('../../HAR.json', import.meta.url));
+  const harPath = fileURLToPath(new URL('./data/meta-ad-library-graphql-response.json', import.meta.url));
   const har = JSON.parse(readFileSync(harPath, 'utf8')) as HarRoot;
   return har.data.ad_library_main.search_results_connection.edges.flatMap(
     (edge) => edge.node.collated_results,

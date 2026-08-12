@@ -3,3 +3,4 @@ dist/
 data/
 .flowtask/
 .env
+.DS_Store
