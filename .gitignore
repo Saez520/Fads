@@ -4,3 +4,7 @@ data/
 .flowtask/
 .env
 .DS_Store
+
+.opencode/
+# Graphify outputs and local state
+graphify-out/
